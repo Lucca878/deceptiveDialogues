@@ -1,0 +1,19 @@
+.github/agents/
+
+# Local Python environment and bytecode
+.venv/
+__pycache__/
+*.py[cod]
+
+# Installed JavaScript dependencies (reinstalled with `npm install`)
+node_modules/
+
+# Rebuilt from frontend/src with `npm run build`
+app/static/js/
+
+# Deployment/runtime artifacts
+*.log
+.env
+
+# macOS
+.DS_Store

@@ -1,0 +1,15 @@
+{
+  "name": "deceptive-dialogues",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web interface for a deceptive dialogue game study",
+  "scripts": {
+  "dev": "npm run build && flask --app server run --debug --port 8000",
+  "build": "esbuild frontend/src/landing.ts frontend/src/room.ts frontend/src/dialogue.ts --bundle --outdir=app/static/js --sourcemap",
+  "typecheck": "tsc"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

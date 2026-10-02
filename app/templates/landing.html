@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Deceptive Dialogues</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+  <script src="/static/js/landing.js" defer></script>
+</head>
+<body>
+  <main class="landing">
+    <section class="intro">
+      <h1>Deceptive Dialogues</h1>
+      <p class="lead">Chat with another participant about hobbies, but don't get caught.</p>
+
+      <dl class="facts">
+        <div>
+          <dt>Duration</dt>
+          <dd>About 20 minutes</dd>
+        </div>
+        <div>
+          <dt>Format</dt>
+          <dd>Text chat with one other person</dd>
+        </div>
+        <div>
+          <dt>Privacy</dt>
+          <dd>Anonymous, and you can stop at any time</dd>
+        </div>
+      </dl>
+
+      <a class="button" href="{{ url_for('room') }}">Start the study</a>
+    </section>
+
+    <div class="preview" aria-hidden="true">
+      <div class="bubble asks"><span></span></div>
+      <div class="bubble answers"><span></span><span></span></div>
+      <div class="bubble asks"><span></span></div>
+      <div class="bubble answers"><span></span><span></span><span></span></div>
+    </div>
+  </main>
+</body>
+</html>

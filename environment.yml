@@ -1,0 +1,6 @@
+name: deceptive-dialogues
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - flask

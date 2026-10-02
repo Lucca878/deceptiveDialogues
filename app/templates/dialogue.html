@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dialogue | Deceptive Dialogues</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <a class="page-back" href="{{ url_for('room') }}">← Room</a>
+  <main class="chat-page">
+    <header class="chat-header">
+      <div class="chat-heading">
+        <h1>Dialogue</h1>
+        <p>Local demo</p>
+      </div>
+    </header>
+
+    <p class="role-announcement" aria-live="polite">
+      Your role: <strong id="role-name"></strong>
+    </p>
+
+    <section class="chat-panel" aria-label="Chat">
+      <div class="chat-messages" id="chat-messages" aria-live="polite">
+        <p class="chat-empty" id="chat-empty">Send a message to begin.</p>
+      </div>
+
+      <form class="chat-composer" id="chat-form">
+        <label class="visually-hidden" for="chat-input">Message</label>
+        <input id="chat-input" name="message" type="text" placeholder="Write a message..." autocomplete="off" required>
+        <button class="chat-send" type="submit">Send</button>
+      </form>
+    </section>
+  </main>
+  <script src="{{ url_for('static', filename='js/dialogue.js') }}" defer></script>
+</body>
+</html>
