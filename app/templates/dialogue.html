@@ -25,6 +25,13 @@
         <p class="chat-empty" id="chat-empty">Send a message to begin.</p>
       </div>
 
+      <p class="chat-typing" id="chat-typing" hidden>
+        <span class="visually-hidden">The other participant is typing.</span>
+        <span class="chat-typing-dot" aria-hidden="true"></span>
+        <span class="chat-typing-dot" aria-hidden="true"></span>
+        <span class="chat-typing-dot" aria-hidden="true"></span>
+      </p>
+
       <form class="chat-composer" id="chat-form">
         <label class="visually-hidden" for="chat-input">Message</label>
         <input id="chat-input" name="message" type="text" placeholder="Write a message..." autocomplete="off" required>

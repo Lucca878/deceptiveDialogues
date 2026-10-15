@@ -1,6 +1,7 @@
 from secrets import choice
 from string import ascii_uppercase, digits
 from threading import Lock
+from time import monotonic
 
 from flask import Flask, jsonify, render_template, request
 
@@ -44,7 +45,7 @@ def create_room():
         while code in rooms:
             code = "".join(choice(alphabet) for _ in range(6))
 
-        rooms[code] = {"participants": {participant_id: None}, "messages": []}
+        rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}}
     return jsonify(code=code, status="waiting")
 
 
@@ -130,6 +131,27 @@ def send_room_message(code):
     return jsonify(message=message), 201
 
 
+TYPING_WINDOW_SECONDS = 3.0
+
+
+@app.post("/api/rooms/<code>/typing")
+def set_typing(code):
+    data = request.get_json(silent=True) or {}
+    participant_id = _get_participant_id(data)
+    if participant_id is None:
+        return jsonify(error="A participant ID is required."), 400
+
+    with rooms_lock:
+        room = rooms.get(code.upper())
+        if room is None:
+            return jsonify(error="Room not found. It may have expired."), 404
+        if room["participants"].get(participant_id) is None:
+            return jsonify(error="You are not a paired participant in this room."), 403
+
+        room["typing"][participant_id] = monotonic()
+    return jsonify(status="ok")
+
+
 @app.get("/api/rooms/<code>/messages")
 def get_room_messages(code):
     participant_id = request.args.get("participant_id", "")
@@ -146,5 +168,10 @@ def get_room_messages(code):
             return jsonify(error="You are not a paired participant in this room."), 403
 
         messages = [message for message in room["messages"] if message["id"] > after_id]
+        now = monotonic()
+        partner_typing = any(
+            partner_id != participant_id and now - last < TYPING_WINDOW_SECONDS
+            for partner_id, last in room["typing"].items()
+        )
 
-    return jsonify(messages=messages)
+    return jsonify(messages=messages, partner_typing=partner_typing)

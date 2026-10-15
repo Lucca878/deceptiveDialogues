@@ -72,7 +72,7 @@ Run `npm run typecheck` before every commit.
 
 - **Frontend:** TypeScript (compiled with esbuild), HTML, plain CSS; no frontend framework
 - **Backend:** Python with Flask
-- **Hosting:** Hetzner CPX22, Ubuntu (planned)
+- **Hosting:** Hetzner CPX22, Ubuntu (deployed prototype)
 
 ## Backend
 
@@ -84,6 +84,37 @@ _To be documented: what is stored, in which format, and how it is exported._
 
 ## Deployment
 
-The VPS deployment keeps the current study 1 installation at `/var/www/study` and deploys this app separately to `/var/www/study2`. Study 2 runs as a single Gunicorn worker on `127.0.0.1:8001`; Nginx can be switched between the existing study 1 site and the study 2 config in `deploy/study2.nginx.conf`. The systemd unit is in `deploy/study2.service`.
+Study 2 is deployed from the public Git repository `https://github.com/Lucca878/deceptiveDialogues` to `/var/www/study2` on the Hetzner VPS. It runs as a single Gunicorn worker on `127.0.0.1:8001`. Its systemd unit and Nginx config are in `deploy/study2.service` and `deploy/study2.nginx.conf`.
+
+### Deploy an update
+
+First, test the change locally, then commit and push it to the `main` branch. On the VPS, pull and restart study 2:
+
+```bash
+ssh root@157.90.127.76
+cd /var/www/study2
+git pull --ff-only
+npm ci
+npm run build
+.venv/bin/pip install -r requirements.txt
+systemctl restart study2.service
+systemctl status study2.service --no-pager
+```
+
+### Switch which study `lpstudies.net` serves
+
+Study 1 is at `/var/www/study1`; study 2 is at `/var/www/study2`. Both deployments remain on the server. To serve study 2 at the domain root:
+
+```bash
+ln -sfn /etc/nginx/sites-available/lpstudies-study2 /etc/nginx/sites-enabled/lpstudies
+nginx -t && systemctl reload nginx
+```
+
+To switch back to study 1:
+
+```bash
+ln -sfn /etc/nginx/sites-available/lpstudies /etc/nginx/sites-enabled/lpstudies
+nginx -t && systemctl reload nginx
+```
 
 The room and message state is in process memory, so the one-worker service is intentional for this prototype. Restarting it clears active rooms and chats. This is suitable for an online technical test, not a real participant collection run until persistent storage and production participant authentication are added.

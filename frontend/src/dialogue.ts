@@ -11,6 +11,7 @@ const form = getElement<HTMLFormElement>("#chat-form");
 const input = getElement<HTMLInputElement>("#chat-input");
 const messages = getElement<HTMLDivElement>("#chat-messages");
 const emptyState = getElement<HTMLParagraphElement>("#chat-empty");
+const typingIndicator = getElement<HTMLParagraphElement>("#chat-typing");
 
 const role = sessionStorage.getItem("chat-role");
 const roomCode = sessionStorage.getItem("chat-room-code");
@@ -26,7 +27,22 @@ if (
   const activeParticipantId = participantId!;
   roleName.textContent = role === "interviewer" ? "Interviewer" : "Interviewee";
   let lastMessageId = 0;
+  let lastTypingPing = 0;
   const renderedMessageIds = new Set<number>();
+
+  function pingTyping(): void {
+    const now = Date.now();
+    if (now - lastTypingPing < 2000) return;
+    lastTypingPing = now;
+
+    void fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/typing`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ participant_id: activeParticipantId }),
+    }).catch(() => {
+      // Typing pings are best-effort only.
+    });
+  }
 
   function renderMessage(message: {
     id: number;
@@ -60,9 +76,12 @@ if (
           participant_id: string;
           text: string;
         }>;
+        partner_typing?: boolean;
         error?: string;
       };
       if (!response.ok) throw new Error(data.error ?? "Could not load messages.");
+
+      typingIndicator.hidden = !data.partner_typing;
 
       for (const message of data.messages ?? []) {
         lastMessageId = Math.max(lastMessageId, message.id);
@@ -76,6 +95,8 @@ if (
   }
 
   void pollMessages();
+
+  input.addEventListener("input", pingTyping);
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
