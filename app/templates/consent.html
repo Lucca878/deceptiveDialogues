@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Information and Consent | The Deception Game</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <main class="consent-page">
+    <section class="consent-card" aria-labelledby="consent-title">
+      <p class="room-eyebrow">THE DECEPTION GAME</p>
+      <h1 id="consent-title">Information and Consent</h1>
+
+      <div class="consent-content">
+        <h2>Researchers</h2>
+        <p>Lucca Pfründer, Department of Methodology and Statistics, Tilburg University.</p>
+
+        <h2>Consent</h2>
+        <p>By clicking “Agree and proceed,” you voluntarily agree to participate in this study. This does not interfere with your right to withdraw from this study at any time without an explanation.</p>
+
+        <p>By agreeing to this informed consent form, I (the participant) confirm that I have read and understood the entire information letter and confirm that:</p>
+        <ul>
+          <li>I have read and understood the entire information letter that belongs to this study.</li>
+          <li>I have been given the opportunity to ask questions about the study and that these questions were answered to my complete satisfaction.</li>
+          <li>I had sufficient time to decide whether I would participate or not.</li>
+          <li>I know that participation is completely voluntary.</li>
+          <li>I know that the duration of the study is 20 minutes.</li>
+          <li>I know I can decide to withdraw from the study at any time, without any negative consequences and without providing any explanation.</li>
+          <li>I know I have the right, in principle, to request access to and rectify, erase, restrict or object to the processing of my personal data.</li>
+          <li>I know that my research data will be processed as described in the information letter and only the researcher team have access to this data.</li>
+          <li>I give permission to use my research data for the purposes that are mentioned in the information letter that belongs to this study.</li>
+          <li>I give permission to store my research data for the period of 10 years.</li>
+        </ul>
+
+        <p>I hereby voluntarily agree to participate in the study <strong>"The Deception Game"</strong>.</p>
+      </div>
+
+      <form class="consent-actions" method="post" action="{{ url_for('consent_decision') }}">
+        <button class="button button-agree" type="submit" name="decision" value="accept">Agree</button>
+        <button class="button button-deny" type="submit" name="decision" value="deny">Deny</button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

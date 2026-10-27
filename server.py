@@ -1,13 +1,29 @@
+from functools import wraps
+from os import environ
 from secrets import choice
+from secrets import token_hex
 from string import ascii_uppercase, digits
 from threading import Lock
 from time import monotonic
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
 app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
+app.config["SECRET_KEY"] = environ.get("FLASK_SECRET_KEY") or token_hex(32)
 rooms = {}
 rooms_lock = Lock()
+
+
+def consent_required(view):
+    @wraps(view)
+    def wrapped(*args, **kwargs):
+        if session.get("consent_accepted") is not True:
+            if request.path.startswith("/api/"):
+                return jsonify(error="Please provide consent before continuing."), 403
+            return redirect(url_for("consent"))
+        return view(*args, **kwargs)
+
+    return wrapped
 
 
 def _get_participant_id(data):
@@ -23,16 +39,38 @@ def landing():
 
 
 @app.get("/dialogue")
+@consent_required
 def dialogue():
     return render_template("dialogue.html")
 
 
 @app.get("/room")
+@consent_required
 def room():
     return render_template("room.html")
 
 
+@app.get("/consent")
+def consent():
+    if session.get("consent_accepted") is True:
+        return redirect(url_for("room"))
+    return render_template("consent.html")
+
+
+@app.post("/consent")
+def consent_decision():
+    decision = request.form.get("decision")
+    if decision == "accept":
+        session["consent_accepted"] = True
+        return redirect(url_for("room"))
+    if decision == "deny":
+        session.pop("consent_accepted", None)
+        return render_template("no_consent.html")
+    return "Invalid consent choice.", 400
+
+
 @app.post("/api/rooms")
+@consent_required
 def create_room():
     data = request.get_json(silent=True) or {}
     participant_id = _get_participant_id(data)
@@ -50,6 +88,7 @@ def create_room():
 
 
 @app.post("/api/rooms/<code>/join")
+@consent_required
 def join_room(code):
     data = request.get_json(silent=True) or {}
     participant_id = _get_participant_id(data)
@@ -81,6 +120,7 @@ def join_room(code):
 
 
 @app.get("/api/rooms/<code>")
+@consent_required
 def room_status(code):
     participant_id = request.args.get("participant_id", "")
     with rooms_lock:
@@ -99,6 +139,7 @@ def room_status(code):
 
 
 @app.post("/api/rooms/<code>/messages")
+@consent_required
 def send_room_message(code):
     data = request.get_json(silent=True) or {}
     participant_id = _get_participant_id(data)
@@ -135,6 +176,7 @@ TYPING_WINDOW_SECONDS = 3.0
 
 
 @app.post("/api/rooms/<code>/typing")
+@consent_required
 def set_typing(code):
     data = request.get_json(silent=True) or {}
     participant_id = _get_participant_id(data)
@@ -153,6 +195,7 @@ def set_typing(code):
 
 
 @app.get("/api/rooms/<code>/messages")
+@consent_required
 def get_room_messages(code):
     participant_id = request.args.get("participant_id", "")
     try:
