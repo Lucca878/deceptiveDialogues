@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Your travels | The Deception Game</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <main class="travel-page">
+    <section class="travel-card travel-intro" aria-labelledby="travel-intro-title">
+      <h1 id="travel-intro-title">Your travels</h1>
+      <p class="travel-lead">Before we start, we'd like to know a little about places you have travelled to.</p>
+      <p class="travel-supporting">This takes about 3 minutes. There are no right or wrong answers.</p>
+      <form method="post" action="{{ url_for('begin_travel_screening') }}">
+        <button class="button travel-primary" type="submit">Start <span aria-hidden="true">→</span></button>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

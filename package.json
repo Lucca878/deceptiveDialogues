@@ -5,7 +5,7 @@
   "description": "Web interface for a deceptive dialogue game study",
   "scripts": {
   "dev": "npm run build && flask --app server run --debug --port 8000",
-  "build": "esbuild frontend/src/landing.ts frontend/src/room.ts frontend/src/dialogue.ts --bundle --outdir=app/static/js --sourcemap",
+  "build": "esbuild frontend/src/landing.ts frontend/src/room.ts frontend/src/dialogue.ts frontend/src/travel.ts --bundle --outdir=app/static/js --sourcemap",
   "typecheck": "tsc"
   },
   "devDependencies": {

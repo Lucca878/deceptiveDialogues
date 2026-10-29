@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cities you have visited | The Deception Game</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <script src="{{ url_for('static', filename='js/travel.js') }}" defer></script>
+</head>
+<body>
+  <main class="travel-page travel-page--form">
+    <section class="travel-form-wrap" aria-labelledby="cities-title">
+      <h1 id="cities-title">Cities you have visited</h1>
+      <p class="travel-lead">Please list 5 different cities you have visited in the past 3 years, since <strong>{{ window_label }}</strong>. Please name cities, not countries or regions, and don't include cities you have lived in.</p>
+
+      <div class="travel-progress" aria-label="Entry progress">
+        <div class="travel-progress__labels"><span>Your entries</span><strong id="progress-count" aria-live="polite">0 of 5 complete</strong></div>
+        <div class="travel-progress__track" id="progress-bar" role="progressbar" aria-label="Completed city entries" aria-valuemin="0" aria-valuemax="5" aria-valuenow="0"><span id="progress-fill"></span></div>
+      </div>
+      <p class="travel-duplicate-warning" id="duplicate-warning" role="status" hidden>These entries include the same city and country. Please make all five different.</p>
+
+      <form class="travel-form" method="post" action="{{ url_for('travel_cities') }}">
+        {% for answer in answers %}
+          {% set index = loop.index %}
+          <section class="city-card" data-city-card aria-labelledby="city-card-title-{{ index }}">
+            <h2 id="city-card-title-{{ index }}">City {{ index }}</h2>
+
+            <div class="travel-fields travel-fields--city">
+              <div class="travel-field">
+                <label for="city-{{ index }}">City</label>
+                <input id="city-{{ index }}" name="city_{{ index }}" type="text" maxlength="100" autocomplete="off" placeholder="e.g. Kyoto" value="{{ answer.city }}" required>
+                {% if errors.get('city_' ~ index) %}<span class="field-error">{{ errors.get('city_' ~ index) }}</span>{% endif %}
+              </div>
+              <div class="travel-field">
+                <label for="country-{{ index }}">Country</label>
+                <select id="country-{{ index }}" name="country_{{ index }}" required>
+                  <option value="">Choose a country</option>
+                  {% for country in countries %}<option value="{{ country }}" {% if answer.country == country %}selected{% endif %}>{{ country }}</option>{% endfor %}
+                </select>
+                {% if errors.get('country_' ~ index) %}<span class="field-error">{{ errors.get('country_' ~ index) }}</span>{% endif %}
+              </div>
+            </div>
+
+            <div class="travel-fields travel-fields--three">
+              <div class="travel-field">
+                <label for="visit-year-{{ index }}">Most recent visit</label>
+                <div class="travel-date-selects" data-date-selects data-start-month="{{ start_month }}" data-current-month="{{ current_month }}">
+                  <select id="visit-year-{{ index }}" name="visit_year_{{ index }}" data-visit-year required aria-label="Visit year for city {{ index }}">
+                    <option value="">Year</option>
+                    {% for year, options in visit_month_options %}<option value="{{ year }}" {% if answer.visit_year == year|string %}selected{% endif %}>{{ year }}</option>{% endfor %}
+                  </select>
+                  <select id="visit-month-{{ index }}" name="visit_month_number_{{ index }}" data-visit-month required aria-label="Visit month for city {{ index }}" {% if not answer.visit_year %}disabled{% endif %}>
+                    <option value="">Month</option>
+                    {% for month_value, month_name in months %}<option value="{{ month_value }}" {% if answer.visit_month_number == month_value %}selected{% endif %}>{{ month_name }}</option>{% endfor %}
+                  </select>
+                </div>
+                {% if errors.get('visit_month_' ~ index) %}<span class="field-error">{{ errors.get('visit_month_' ~ index) }}</span>{% endif %}
+              </div>
+              <div class="travel-field">
+                <label for="duration-{{ index }}">How long did you stay?</label>
+                <select id="duration-{{ index }}" name="duration_{{ index }}" required>
+                  <option value="">Choose a duration</option>
+                  <option value="1_day_or_less" {% if answer.duration == '1_day_or_less' %}selected{% endif %}>1 day or less</option>
+                  <option value="2_3_days" {% if answer.duration == '2_3_days' %}selected{% endif %}>2–3 days</option>
+                  <option value="4_7_days" {% if answer.duration == '4_7_days' %}selected{% endif %}>4–7 days</option>
+                  <option value="more_than_a_week" {% if answer.duration == 'more_than_a_week' %}selected{% endif %}>More than a week</option>
+                </select>
+                {% if errors.get('duration_' ~ index) %}<span class="field-error">{{ errors.get('duration_' ~ index) }}</span>{% endif %}
+              </div>
+              <div class="travel-field">
+                <label for="reason-{{ index }}">Main reason for the trip</label>
+                <select id="reason-{{ index }}" name="reason_{{ index }}" required>
+                  <option value="">Choose a reason</option>
+                  <option value="holiday" {% if answer.reason == 'holiday' %}selected{% endif %}>Holiday</option>
+                  <option value="work_or_study" {% if answer.reason == 'work_or_study' %}selected{% endif %}>Work or study</option>
+                  <option value="visiting_family_or_friends" {% if answer.reason == 'visiting_family_or_friends' %}selected{% endif %}>Visiting family or friends</option>
+                  <option value="other" {% if answer.reason == 'other' %}selected{% endif %}>Other</option>
+                </select>
+                {% if errors.get('reason_' ~ index) %}<span class="field-error">{{ errors.get('reason_' ~ index) }}</span>{% endif %}
+              </div>
+            </div>
+
+            <div class="travel-fields travel-fields--bottom">
+              <div class="travel-field">
+                <label for="companions-{{ index }}">Who were you with?</label>
+                <select id="companions-{{ index }}" name="companions_{{ index }}" required>
+                  <option value="">Choose who</option>
+                  <option value="alone" {% if answer.companions == 'alone' %}selected{% endif %}>Alone</option>
+                  <option value="partner" {% if answer.companions == 'partner' %}selected{% endif %}>Partner</option>
+                  <option value="family" {% if answer.companions == 'family' %}selected{% endif %}>Family</option>
+                  <option value="friends" {% if answer.companions == 'friends' %}selected{% endif %}>Friends</option>
+                  <option value="colleagues" {% if answer.companions == 'colleagues' %}selected{% endif %}>Colleagues</option>
+                  <option value="other" {% if answer.companions == 'other' %}selected{% endif %}>Other</option>
+                </select>
+                {% if errors.get('companions_' ~ index) %}<span class="field-error">{{ errors.get('companions_' ~ index) }}</span>{% endif %}
+              </div>
+              <fieldset class="travel-field familiarity-field" aria-describedby="familiarity-help-{{ index }}">
+                <legend>How well do you know this city?</legend>
+                <div class="familiarity-options">
+                  {% for rating in range(1, 8) %}
+                  <label class="familiarity-option" for="familiarity-{{ index }}-{{ rating }}">
+                    <input id="familiarity-{{ index }}-{{ rating }}" name="familiarity_{{ index }}" type="radio" value="{{ rating }}" {% if answer.familiarity == rating|string %}checked{% endif %} required>
+                    <span>{{ rating }}</span>
+                  </label>
+                  {% endfor %}
+                </div>
+                <div class="familiarity-help" id="familiarity-help-{{ index }}"><span>1 · Not at all</span><span>7 · Very well</span></div>
+                {% if errors.get('familiarity_' ~ index) %}<span class="field-error">{{ errors.get('familiarity_' ~ index) }}</span>{% endif %}
+              </fieldset>
+            </div>
+          </section>
+        {% endfor %}
+
+        <div class="travel-form__footer">
+          <a class="travel-exit" href="{{ url_for('unable_to_name_cities') }}">I can't name 5 cities from the past 3 years</a>
+          <button class="button travel-primary" type="submit">Continue <span aria-hidden="true">→</span></button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

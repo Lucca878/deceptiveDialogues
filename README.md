@@ -4,7 +4,7 @@ Web interface for a game-based study collecting deceptive and truthful dialogues
 Two anonymous participants chat by text: an interviewer asks questions trying to
 determine credibility, the interviewee tries to convince them (truthfully or not).
 
-**Status:** Flask serves separate landing, room setup, and chat pages. Paired participants can exchange messages; data is held in server memory and is not persisted.
+**Status:** Flask serves the landing, consent, travel-screening, room setup, and chat pages. Paired participants can exchange messages; chat and travel answers are not persisted.
 
 ## Requirements
 
@@ -24,7 +24,7 @@ npm run dev          # build TypeScript and start the Flask development server
 
 The Conda environment pins Python to 3.12 and installs Flask. Open <http://localhost:8000/> after the server starts. Stop it with `Ctrl+C`.
 
-The landing page is served at `/`, room setup at `/room`, and chat at `/dialogue`. Create a room and share its six-character code, or join using a code. When the second participant joins, Flask randomly assigns one interviewer and one interviewee, then both are sent to the chat page. Messages are sent through Flask and appear for both participants. For this prototype they exist only in server memory and disappear when the server restarts.
+The study flow is landing → consent → travel introduction → five-city questionnaire → room setup at `/room` → chat at `/dialogue`. The questionnaire checks five distinct city/country pairs and visit months within the rolling 36-month window. Answers are validated but discarded; only temporary session flags enforce the flow. Participants who cannot provide five cities are screened out. Create a room and share its six-character code, or join using a code. When the second participant joins, Flask randomly assigns one interviewer and one interviewee, then both are sent to the chat page. Messages are sent through Flask and appear for both participants. Chat data exists only in server memory and disappears when the server restarts.
 
 ## Project structure
 
@@ -33,6 +33,10 @@ deceptiveDialogues/
 ├── app/                    # everything served to the browser
 │   ├── templates/          # HTML pages rendered by Flask
 │   │   ├── landing.html
+│   │   ├── consent.html
+│   │   ├── travel_intro.html
+│   │   ├── travel_cities.html
+│   │   ├── screened_out.html
 │   │   ├── room.html
 │   │   └── dialogue.html
 │   └── static/
@@ -42,7 +46,8 @@ deceptiveDialogues/
 │   └── src/                # TypeScript source
 │       ├── landing.ts
 │       ├── room.ts
-│       └── dialogue.ts
+│       ├── dialogue.ts
+│       └── travel.ts
 ├── server.py               # Flask routes
 ├── environment.yml         # Conda Python and Flask dependencies
 ├── package.json            # npm scripts and build tools
