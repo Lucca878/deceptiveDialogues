@@ -97,18 +97,19 @@ Study 2 is deployed from the public Git repository `https://github.com/Lucca878/
 
 ### Deploy an update
 
-First, test the change locally, then commit and push it to the `main` branch. On the VPS, pull and restart study 2:
+First, test the change locally, then commit and push it to the `main` branch.
+From the repository root on your Mac, run:
 
 ```bash
-ssh root@157.90.127.76
-cd /var/www/study2
-git pull --ff-only
-npm ci
-npm run build
-.venv/bin/pip install -r requirements.txt
-systemctl restart study2.service
-systemctl status study2.service --no-pager
+sh deploy.sh
 ```
+
+The script connects to the VPS over SSH, pulls the latest changes in `/var/www/study2`,
+installs dependencies, builds the frontend, restarts `study2.service`, and displays
+its status. It stops if a command fails. SSH access to `root@157.90.127.76` is required;
+enter any SSH password or key passphrase directly in your terminal if prompted.
+Restarting clears all active rooms and chats. After deployment, check the site at
+<https://lpstudies.net>.
 
 ### Switch which study `lpstudies.net` serves
 
