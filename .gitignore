@@ -15,6 +15,7 @@ app/static/js/
 *.log
 .env
 server-explanation.md
+form-prefill.md
 
 # macOS
 .DS_Store

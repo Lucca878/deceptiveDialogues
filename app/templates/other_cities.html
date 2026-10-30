@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Other cities | The Deception Game</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <main class="travel-page travel-page--form">
+    <section class="travel-form-wrap" aria-labelledby="other-cities-title">
+      <h1 id="other-cities-title">Other cities</h1>
+      <p class="travel-lead">Here are some other cities. For each one, tell us whether you have ever been there (even briefly) in the past 3 years, and how well you know it, for example from friends, films, the news or school.</p>
+
+      <form method="post" action="{{ url_for('other_cities') }}">
+        {% for city_id, city, country in cities %}
+        <section class="city-card" aria-labelledby="candidate-{{ city_id }}">
+          <h2 id="candidate-{{ city_id }}">{{ city }}, {{ country }}</h2>
+          <div class="travel-fields travel-fields--bottom">
+            <fieldset class="travel-field familiarity-field">
+              <legend>Have you ever been here?</legend>
+              <div class="visit-options">
+                {% for value, label in [('yes', 'Yes'), ('no', 'No')] %}
+                <label class="familiarity-option" for="visited-{{ city_id }}-{{ value }}">
+                  <input id="visited-{{ city_id }}-{{ value }}" type="radio" name="visited_{{ city_id }}" value="{{ value }}" {% if values.get('visited_' ~ city_id) == value %}checked{% endif %} required aria-describedby="visited-error-{{ city_id }}">
+                  <span>{{ label }}</span>
+                </label>
+                {% endfor %}
+              </div>
+              <span class="field-error" id="visited-error-{{ city_id }}">{{ errors.get('visited_' ~ city_id, '') }}</span>
+            </fieldset>
+            <fieldset class="travel-field familiarity-field" aria-describedby="familiarity-help-{{ city_id }} familiarity-error-{{ city_id }}">
+              <legend>How well do you know this city?</legend>
+              <div class="familiarity-options">
+                {% for rating in range(1, 8) %}
+                <label class="familiarity-option" for="familiarity-{{ city_id }}-{{ rating }}">
+                  <input id="familiarity-{{ city_id }}-{{ rating }}" name="familiarity_{{ city_id }}" type="radio" value="{{ rating }}" {% if values.get('familiarity_' ~ city_id) == rating|string %}checked{% endif %} required>
+                  <span>{{ rating }}</span>
+                </label>
+                {% endfor %}
+              </div>
+              <div class="familiarity-help" id="familiarity-help-{{ city_id }}"><span>1 · Not at all</span><span>7 · Very well</span></div>
+              <span class="field-error" id="familiarity-error-{{ city_id }}">{{ errors.get('familiarity_' ~ city_id, '') }}</span>
+            </fieldset>
+          </div>
+        </section>
+        {% endfor %}
+        <div class="consent-actions">
+          <button class="button travel-primary" type="submit">Continue <span aria-hidden="true">→</span></button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

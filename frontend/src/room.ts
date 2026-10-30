@@ -15,33 +15,18 @@ function getElement<T extends Element>(selector: string): T {
   return element;
 }
 
-const createButton = getElement<HTMLButtonElement>("#create-room");
-const joinForm = getElement<HTMLFormElement>("#join-room-form");
-const joinButton = getElement<HTMLButtonElement>("#join-room");
-const roomCodeInput = getElement<HTMLInputElement>("#room-code-input");
-const roomCodeDisplay = getElement<HTMLDivElement>("#room-code-display");
-const roomCode = getElement<HTMLElement>("#room-code");
+const retryButton = getElement<HTMLButtonElement>("#retry-matching");
 const roomStatus = getElement<HTMLParagraphElement>("#room-status");
 
 sessionStorage.removeItem("chat-role");
 sessionStorage.removeItem("chat-room-code");
+sessionStorage.removeItem("pending-room-code");
 
 const storedParticipantId = sessionStorage.getItem("participant-id");
 const participantId = storedParticipantId ?? crypto.randomUUID();
 if (!storedParticipantId) sessionStorage.setItem("participant-id", participantId);
 
 let pollingTimer: number | undefined;
-
-function setLobbyBusy(isBusy: boolean): void {
-  createButton.disabled = isBusy;
-  joinButton.disabled = isBusy;
-  roomCodeInput.disabled = isBusy;
-}
-
-function showRoomCode(code: string): void {
-  roomCode.textContent = code;
-  roomCodeDisplay.hidden = false;
-}
 
 function readResponse(response: Response): Promise<RoomResponse> {
   return response.json().then((data: RoomResponse) => {
@@ -71,23 +56,20 @@ async function checkRoomStatus(code: string): Promise<void> {
 
     pollingTimer = window.setTimeout(() => void checkRoomStatus(code), 1000);
   } catch (error) {
-    sessionStorage.removeItem("pending-room-code");
     roomStatus.textContent = error instanceof Error ? error.message : "Could not check the room status.";
-    setLobbyBusy(false);
+    retryButton.hidden = false;
   }
 }
 
 function waitForRoom(code: string): void {
-  sessionStorage.setItem("pending-room-code", code);
-  showRoomCode(code);
-  roomStatus.textContent = "Waiting for the other participant to join...";
-  setLobbyBusy(true);
+  roomStatus.textContent = "Waiting for another participant. Please keep this page open.";
   void checkRoomStatus(code);
 }
 
-createButton.addEventListener("click", async () => {
-  setLobbyBusy(true);
-  roomStatus.textContent = "Creating your room...";
+async function findPartner(): Promise<void> {
+  if (pollingTimer !== undefined) window.clearTimeout(pollingTimer);
+  retryButton.hidden = true;
+  roomStatus.textContent = "Finding another participant…";
 
   try {
     const response = await fetch("/api/rooms", {
@@ -96,42 +78,17 @@ createButton.addEventListener("click", async () => {
       body: JSON.stringify({ participant_id: participantId }),
     });
     const data = await readResponse(response);
-    if (!data.code) throw new Error("The server did not return a room code.");
-    waitForRoom(data.code);
-  } catch (error) {
-    roomStatus.textContent = error instanceof Error ? error.message : "Could not create a room.";
-    setLobbyBusy(false);
-  }
-});
-
-joinForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const code = roomCodeInput.value.trim().toUpperCase();
-  if (!code) return;
-
-  setLobbyBusy(true);
-  roomStatus.textContent = "Joining room...";
-
-  try {
-    const response = await fetch(`/api/rooms/${encodeURIComponent(code)}/join`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ participant_id: participantId }),
-    });
-    const data = await readResponse(response);
-    const joinedCode = data.code ?? code;
-    showRoomCode(joinedCode);
-
+    if (!data.code) throw new Error("The server did not return a room assignment.");
     if (data.status === "paired" && data.role) {
-      enterDialogue(joinedCode, data.role);
+      enterDialogue(data.code, data.role);
     } else {
-      waitForRoom(joinedCode);
+      waitForRoom(data.code);
     }
   } catch (error) {
-    roomStatus.textContent = error instanceof Error ? error.message : "Could not join the room.";
-    setLobbyBusy(false);
+    roomStatus.textContent = error instanceof Error ? error.message : "Could not find a participant.";
+    retryButton.hidden = false;
   }
-});
+}
 
-const pendingCode = sessionStorage.getItem("pending-room-code");
-if (pendingCode) waitForRoom(pendingCode);
+retryButton.addEventListener("click", () => void findPartner());
+void findPartner();

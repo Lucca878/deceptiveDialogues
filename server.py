@@ -1,22 +1,26 @@
 from datetime import date
 from functools import wraps
 from os import environ
+from random import SystemRandom
 import re
 from secrets import choice
 from secrets import token_hex
-from string import ascii_uppercase, digits
 from threading import Lock
 from time import monotonic
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
+from city_candidates import CANDIDATE_CITIES
+
 app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
 app.config["SECRET_KEY"] = environ.get("FLASK_SECRET_KEY") or token_hex(32)
 rooms = {}
 rooms_lock = Lock()
+ROOM_CODES = tuple(f"ROOM{number:02d}" for number in range(1, 11))
 WINDOW_MONTHS = 36
 CITY_COUNT = 5
 ALLOW_FEWER_THAN_5 = False
+N_CANDIDATES_SHOWN = 10
 MONTHS = (
     ("01", "January"),
     ("02", "February"),
@@ -331,9 +335,26 @@ def screening_required(view):
             if request.path.startswith("/api/"):
                 return jsonify(error="Please complete the travel questions before continuing."), 403
             return redirect(url_for("travel_intro"))
+        if session.get("other_cities_complete") is not True:
+            if request.path.startswith("/api/"):
+                return jsonify(error="Please complete the other-city questions before continuing."), 403
+            return redirect(url_for("other_cities"))
         return view(*args, **kwargs)
 
     return wrapped
+
+
+def _city_key(city, country):
+    return f"{' '.join(city.split()).casefold()}|{' '.join(country.split()).casefold()}"
+
+
+def _select_other_cities(answers):
+    visited = {_city_key(answer["city"], answer["country"]) for answer in answers}
+    eligible = [
+        city_id for city_id, city, country in CANDIDATE_CITIES
+        if _city_key(city, country) not in visited
+    ]
+    return SystemRandom().sample(eligible, N_CANDIDATES_SHOWN)
 
 
 def _travel_answers(form):
@@ -387,9 +408,7 @@ def _validate_travel_answers(answers, start_month, current_month):
                 errors[f"{field}_{index}"] = "Choose one of the listed options."
 
         if answer["city"] and answer["country"] in COUNTRIES:
-            normalized_city = " ".join(answer["city"].split()).casefold()
-            normalized_country = answer["country"].casefold()
-            key = f"{normalized_city}|{normalized_country}"
+            key = _city_key(answer["city"], answer["country"])
             if key in seen_cities:
                 errors[f"city_{index}"] = "Each entry must be a different city and country."
                 errors[f"city_{seen_cities[key]}"] = "Each entry must be a different city and country."
@@ -434,6 +453,8 @@ def consent():
 
 @app.get("/start")
 def start_study():
+    session.pop("other_city_ids", None)
+    session.pop("other_cities_complete", None)
     session.pop("consent_accepted", None)
     session.pop("travel_intro_seen", None)
     session.pop("travel_screening_complete", None)
@@ -444,6 +465,9 @@ def start_study():
 @app.post("/consent")
 def consent_decision():
     decision = request.form.get("decision")
+    if decision in ("accept", "deny"):
+        session.pop("other_city_ids", None)
+        session.pop("other_cities_complete", None)
     if decision == "accept":
         session["consent_accepted"] = True
         session.pop("travel_intro_seen", None)
@@ -503,8 +527,10 @@ def travel_cities():
                 visit_month_options=_visit_month_options(start_month, current_month),
             ), 400
 
+        session["other_city_ids"] = _select_other_cities(answers)
+        session.pop("other_cities_complete", None)
         session["travel_screening_complete"] = True
-        return redirect(url_for("room"))
+        return redirect(url_for("other_cities"))
 
     answers = _travel_answers({})
     return render_template(
@@ -528,8 +554,9 @@ def unable_to_name_cities():
     if session.get("travel_intro_seen") is not True:
         return redirect(url_for("travel_intro"))
     if ALLOW_FEWER_THAN_5:
+        session["other_city_ids"] = _select_other_cities([])
         session["travel_screening_complete"] = True
-        return redirect(url_for("room"))
+        return redirect(url_for("other_cities"))
     session["travel_screened_out"] = True
     return render_template("screened_out.html")
 
@@ -542,56 +569,74 @@ def screened_out_cities():
     return render_template("screened_out.html")
 
 
+@app.route("/other-cities", methods=["GET", "POST"])
+@consent_required
+def other_cities():
+    if session.get("travel_screened_out") is True:
+        return redirect(url_for("screened_out_cities"))
+    if session.get("travel_screening_complete") is not True:
+        return redirect(url_for("travel_intro"))
+    if session.get("other_cities_complete") is True:
+        return redirect(url_for("room"))
+
+    city_lookup = {city_id: (city, country) for city_id, city, country in CANDIDATE_CITIES}
+    selected_ids = session.get("other_city_ids", [])
+    if len(selected_ids) != N_CANDIDATES_SHOWN or any(city_id not in city_lookup for city_id in selected_ids):
+        # A session from before this step was introduced must repeat the visited-city form.
+        session.pop("travel_screening_complete", None)
+        return redirect(url_for("travel_cities"))
+
+    cities = [(city_id, *city_lookup[city_id]) for city_id in selected_ids]
+    values = {}
+    errors = {}
+    if request.method == "POST":
+        for city_id in selected_ids:
+            for field, allowed in (("visited", {"yes", "no"}), ("familiarity", {str(n) for n in range(1, 8)})):
+                key = f"{field}_{city_id}"
+                values[key] = request.form.get(key, "")
+                if values[key] not in allowed:
+                    errors[key] = "Please choose Yes or No." if field == "visited" else "Please choose a rating from 1 to 7."
+        if not errors:
+            session["other_cities_complete"] = True
+            return redirect(url_for("room"))
+
+    return render_template("other_cities.html", cities=cities, values=values, errors=errors), 400 if errors else 200
+
+
 @app.post("/api/rooms")
 @consent_required
 @screening_required
-def create_room():
-    data = request.get_json(silent=True) or {}
-    participant_id = _get_participant_id(data)
-    if participant_id is None:
-        return jsonify(error="A participant ID is required."), 400
-
-    alphabet = ascii_uppercase + digits
-    with rooms_lock:
-        code = "".join(choice(alphabet) for _ in range(6))
-        while code in rooms:
-            code = "".join(choice(alphabet) for _ in range(6))
-
-        rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}}
-    return jsonify(code=code, status="waiting")
-
-
-@app.post("/api/rooms/<code>/join")
-@consent_required
-@screening_required
-def join_room(code):
+def match_room():
     data = request.get_json(silent=True) or {}
     participant_id = _get_participant_id(data)
     if participant_id is None:
         return jsonify(error="A participant ID is required."), 400
 
     with rooms_lock:
-        room = rooms.get(code.upper())
-        if room is None:
-            return jsonify(error="Room not found. Check the code and try again."), 404
+        # Returning clients keep their place, even when every room is occupied.
+        for code, room in rooms.items():
+            if participant_id in room["participants"]:
+                role = room["participants"][participant_id]
+                if role is None:
+                    return jsonify(code=code, status="waiting")
+                return jsonify(code=code, status="paired", role=role)
 
-        participants = room["participants"]
-        if participant_id not in participants:
-            if len(participants) >= 2:
-                return jsonify(error="This room is already full."), 409
-            participants[participant_id] = None
+        # Fill a waiting room before opening the next unused code.
+        code = next((code for code in ROOM_CODES if code in rooms and len(rooms[code]["participants"]) == 1), None)
+        if code is None:
+            code = next((code for code in ROOM_CODES if code not in rooms), None)
+            if code is None:
+                return jsonify(error="All rooms are currently occupied."), 409
+            rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}}
+            return jsonify(code=code, status="waiting")
 
-        if len(participants) == 2 and all(role is None for role in participants.values()):
-            participant_ids = list(participants)
-            roles = ["interviewer", "interviewee"]
-            if choice((True, False)):
-                roles.reverse()
-            participants.update(zip(participant_ids, roles))
-
-        role = participants[participant_id]
-    if role is None:
-        return jsonify(code=code.upper(), status="waiting")
-    return jsonify(code=code.upper(), status="paired", role=role)
+        participants = rooms[code]["participants"]
+        participants[participant_id] = None
+        roles = ["interviewer", "interviewee"]
+        if choice((True, False)):
+            roles.reverse()
+        participants.update(zip(participants, roles))
+        return jsonify(code=code, status="paired", role=participants[participant_id])
 
 
 @app.get("/api/rooms/<code>")

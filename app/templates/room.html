@@ -3,32 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Join a room | Deceptive Dialogues</title>
+  <title>Join a conversation | The Deception Game</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-  <a class="page-back" href="{{ url_for('landing') }}">← Home</a>
-  <main class="room-page">
-    <section class="room-card" aria-labelledby="room-title">
-      <p class="room-eyebrow">DECEPTIVE DIALOGUES</p>
+  <main class="travel-page">
+    <section class="travel-card travel-intro" aria-labelledby="room-title">
       <h1 id="room-title">Join a conversation</h1>
-      <p class="room-intro">Create a room and invite the other participant, or enter a room code you received.</p>
-
-      <button class="chat-send room-create" id="create-room" type="button">Create a room</button>
-
-      <div class="room-divider" aria-hidden="true"><span>or join with a code</span></div>
-
-      <form class="room-join" id="join-room-form">
-        <label class="visually-hidden" for="room-code-input">Room code</label>
-        <input id="room-code-input" name="room-code" type="text" placeholder="Enter 6-character code" maxlength="6" autocomplete="off" required>
-        <button class="chat-send" id="join-room" type="submit">Join room</button>
-      </form>
-
-      <div class="room-code-display" id="room-code-display" hidden>
-        <span>Share this code with the other participant</span>
-        <strong id="room-code"></strong>
-      </div>
-      <p class="room-status" id="room-status" role="status" aria-live="polite">Your role will be assigned a role.</p>
+      <p class="travel-lead">We will automatically match you with another participant. Your conversation will open when you are paired.</p>
+      <p class="travel-supporting" id="room-status" role="status" aria-live="polite">Finding another participant…</p>
+      <button class="button button-agree" id="retry-matching" type="button" hidden>Try again</button>
+      <noscript><p>JavaScript must be enabled to match you with another participant.</p></noscript>
     </section>
   </main>
   <script src="{{ url_for('static', filename='js/room.js') }}" defer></script>

@@ -69,11 +69,64 @@ class TravelScreeningTests(unittest.TestCase):
         self.begin_screening()
         response = self.client.post("/travel-cities", data=self.valid_answers())
         self.assertEqual(response.status_code, 302)
-        self.assertTrue(response.headers["Location"].endswith("/room"))
-        self.assertEqual(self.client.get("/room").status_code, 200)
+        self.assertTrue(response.headers["Location"].endswith("/other-cities"))
+        self.assertEqual(self.client.get("/room").status_code, 302)
         with self.client.session_transaction() as browser_session:
             self.assertTrue(browser_session["travel_screening_complete"])
             self.assertNotIn("City 1", repr(dict(browser_session)))
+
+    def test_candidate_pool_and_exclusion(self):
+        self.assertEqual(len(server.CANDIDATE_CITIES), 40)
+        self.assertEqual(len({entry[0] for entry in server.CANDIDATE_CITIES}), 40)
+        self.assertTrue(all(country in server.COUNTRIES for _, _, country in server.CANDIDATE_CITIES))
+        answers = [{"city": f"  {city.upper()}  ", "country": country} for _, city, country in server.CANDIDATE_CITIES[:5]]
+        excluded = {entry[0] for entry in server.CANDIDATE_CITIES[:5]}
+        for _ in range(10):
+            selected = server._select_other_cities(answers)
+            self.assertEqual(len(set(selected)), 10)
+            self.assertTrue(excluded.isdisjoint(selected))
+
+    def prepare_other_cities(self):
+        self.begin_screening()
+        self.client.post("/travel-cities", data=self.valid_answers())
+        with self.client.session_transaction() as browser_session:
+            return list(browser_session["other_city_ids"])
+
+    def test_other_city_order_survives_refresh_and_invalid_post(self):
+        selected = self.prepare_other_cities()
+        first = self.client.get("/other-cities")
+        second = self.client.get("/other-cities")
+        self.assertEqual(first.data, second.data)
+        response = self.client.post("/other-cities", data={f"visited_{selected[0]}": "yes"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Please choose a rating", response.data)
+        with self.client.session_transaction() as browser_session:
+            self.assertEqual(browser_session["other_city_ids"], selected)
+        self.assertEqual(self.client.post("/api/rooms", json={"participant_id": "test"}).status_code, 403)
+
+    def test_other_cities_valid_answers_open_room_without_storing_ratings(self):
+        selected = self.prepare_other_cities()
+        data = {}
+        for city_id in selected:
+            data[f"visited_{city_id}"] = "no"
+            data[f"familiarity_{city_id}"] = "4"
+        response = self.client.post("/other-cities", data=data)
+        self.assertTrue(response.headers["Location"].endswith("/room"))
+        self.assertEqual(self.client.get("/room").status_code, 200)
+        with self.client.session_transaction() as browser_session:
+            self.assertTrue(browser_session["other_cities_complete"])
+            self.assertFalse(any(key.startswith(("visited_", "familiarity_")) for key in browser_session))
+
+    def test_other_cities_cannot_be_skipped_or_given_invalid_choices(self):
+        self.assertTrue(self.client.get("/other-cities").headers["Location"].endswith("/consent"))
+        selected = self.prepare_other_cities()
+        data = {f"visited_{city_id}": "yes" for city_id in selected}
+        data.update({f"familiarity_{city_id}": "8" for city_id in selected})
+        self.assertEqual(self.client.post("/other-cities", data=data).status_code, 400)
+        self.client.get("/start")
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("other_city_ids", browser_session)
+            self.assertNotIn("other_cities_complete", browser_session)
 
     def test_duplicate_cities_are_rejected_after_normalization(self):
         self.begin_screening()
