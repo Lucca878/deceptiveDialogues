@@ -16,7 +16,7 @@ app = Flask(__name__, template_folder="app/templates", static_folder="app/static
 app.config["SECRET_KEY"] = environ.get("FLASK_SECRET_KEY") or token_hex(32)
 rooms = {}
 rooms_lock = Lock()
-ROOM_CODES = tuple(f"ROOM{number:02d}" for number in range(1, 11))
+ROOM_CODES = tuple(f"ROOM{number:02d}" for number in range(1, 21))
 WINDOW_MONTHS = 36
 CITY_COUNT = 5
 ALLOW_FEWER_THAN_5 = False
