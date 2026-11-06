@@ -7,15 +7,8 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
-  <a class="page-back" href="{{ url_for('room') }}">← Room</a>
   <main class="chat-page">
-    <header class="chat-header">
-      <div class="chat-heading">
-        <h1>Dialogue</h1>
-        <p>Local demo</p>
-      </div>
-    </header>
-
+    <h1 class="visually-hidden">Dialogue</h1>
     <p class="role-announcement" aria-live="polite">
       Your role: <strong id="role-name"></strong>
     </p>

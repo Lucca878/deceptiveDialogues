@@ -646,45 +646,8 @@ h1 {
   min-height: 100vh;
   margin: 0 auto;
   padding: clamp(1rem, 4vw, 2.5rem);
-  padding-top: clamp(5rem, 7vw, 6rem);
   display: flex;
   flex-direction: column;
-}
-
-.chat-header {
-  display: flex;
-  align-items: center;
-  gap: 1.5rem;
-  margin-bottom: 1.5rem;
-}
-
-.page-back {
-  position: fixed;
-  top: clamp(1rem, 3vw, 2rem);
-  left: clamp(1rem, 3vw, 2rem);
-  z-index: 1;
-  padding: 0.4rem 0.55rem;
-  border-radius: 0.5rem;
-  color: var(--muted);
-  text-decoration: none;
-  transition: color 0.15s ease, background-color 0.15s ease;
-}
-
-.page-back:hover {
-  color: var(--ink);
-  background: rgb(28 36 48 / 5%);
-}
-
-.chat-heading h1 {
-  margin: 0;
-  font-size: 1.5rem;
-  letter-spacing: -0.02em;
-}
-
-.chat-heading p {
-  margin: 0.2rem 0 0;
-  color: var(--muted);
-  font-size: 0.875rem;
 }
 
 .role-announcement {
@@ -913,8 +876,7 @@ h1 {
 }
 
 .chat-composer input:focus-visible,
-.chat-send:focus-visible,
-.page-back:focus-visible {
+.chat-send:focus-visible {
   outline: 3px solid var(--button-hover);
   outline-offset: 3px;
 }
@@ -948,11 +910,7 @@ h1 {
 @media (max-width: 40rem) {
   .chat-page {
     min-height: 100svh;
-    padding: 5rem 1rem 1rem;
-  }
-
-  .chat-header {
-    gap: 1rem;
+    padding: 1rem;
   }
 
   .chat-panel {
