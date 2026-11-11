@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import unittest
 
 import server
@@ -70,6 +71,28 @@ class RoomMatchingTests(unittest.TestCase):
         self.assertEqual(self.client().post("/api/rooms/ROOM01/join", json={"participant_id": "p"}).status_code, 404)
         self.assertEqual(self.client().post("/api/rooms", json={}).status_code, 400)
         self.assertEqual(server.app.test_client().post("/api/rooms", json={"participant_id": "p"}).status_code, 403)
+
+    def test_message_timestamp_is_server_generated_and_not_exposed(self):
+        client = self.client()
+        client.post("/api/rooms", json={"participant_id": "first"})
+        client.post("/api/rooms", json={"participant_id": "second"})
+
+        sent = client.post(
+            "/api/rooms/ROOM01/messages",
+            json={"participant_id": "first", "text": "Hello", "timestamp": "client value"},
+        )
+        self.assertEqual(sent.status_code, 201)
+        self.assertNotIn("timestamp", sent.get_json()["message"])
+
+        stored_message = server.rooms["ROOM01"]["messages"][0]
+        timestamp = datetime.fromisoformat(stored_message["timestamp"])
+        self.assertEqual(timestamp.tzinfo, timezone.utc)
+        self.assertNotEqual(stored_message["timestamp"], "client value")
+
+        received = client.get(
+            "/api/rooms/ROOM01/messages?participant_id=first&after_id=0"
+        ).get_json()
+        self.assertNotIn("timestamp", received["messages"][0])
 
 
 if __name__ == "__main__":

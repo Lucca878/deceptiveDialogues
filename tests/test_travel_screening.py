@@ -123,9 +123,11 @@ class TravelScreeningTests(unittest.TestCase):
         data = {f"visited_{city_id}": "yes" for city_id in selected}
         data.update({f"familiarity_{city_id}": "8" for city_id in selected})
         self.assertEqual(self.client.post("/other-cities", data=data).status_code, 400)
-        self.client.get("/start")
+        response = self.client.get("/start")
+        self.assertTrue(response.headers["Location"].endswith("/consent"))
         with self.client.session_transaction() as browser_session:
-            self.assertNotIn("other_city_ids", browser_session)
+            self.assertEqual(browser_session["other_city_ids"], selected)
+            self.assertTrue(browser_session["travel_screening_complete"])
             self.assertNotIn("other_cities_complete", browser_session)
 
     def test_duplicate_cities_are_rejected_after_normalization(self):
@@ -175,7 +177,7 @@ class TravelScreeningTests(unittest.TestCase):
 
     def test_screen_out_blocks_room_and_apis(self):
         self.begin_screening()
-        response = self.client.get("/travel-cities/unable")
+        response = self.client.post("/travel-cities/unable")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"you can't take part in this study", response.data)
         self.assertEqual(self.client.get("/room").status_code, 302)
@@ -184,12 +186,22 @@ class TravelScreeningTests(unittest.TestCase):
             403,
         )
 
-    def test_new_start_clears_screening_and_consent(self):
+    def test_unable_route_requires_post(self):
         self.begin_screening()
-        self.client.get("/travel-cities/unable")
+        response = self.client.get("/travel-cities/unable")
+        self.assertEqual(response.status_code, 405)
+        with self.client.session_transaction() as browser_session:
+            self.assertNotIn("travel_screened_out", browser_session)
+
+    def test_start_preserves_consent_and_screen_out_state(self):
+        self.begin_screening()
+        self.client.post("/travel-cities/unable")
         response = self.client.get("/start")
         self.assertTrue(response.headers["Location"].endswith("/consent"))
-        self.assertTrue(self.client.get("/room").headers["Location"].endswith("/consent"))
+        with self.client.session_transaction() as browser_session:
+            self.assertTrue(browser_session["consent_accepted"])
+            self.assertTrue(browser_session["travel_screened_out"])
+        self.assertTrue(self.client.get("/room").headers["Location"].endswith("/screened-out-cities"))
 
 
 if __name__ == "__main__":

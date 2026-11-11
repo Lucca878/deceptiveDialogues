@@ -19,7 +19,7 @@
       </div>
       <p class="travel-duplicate-warning" id="duplicate-warning" role="status" hidden>These entries include the same city and country. Please make all five different.</p>
 
-      <form class="travel-form" method="post" action="{{ url_for('travel_cities') }}">
+      <form id="travel-form" class="travel-form" method="post" action="{{ url_for('travel_cities') }}">
         {% for answer in answers %}
           {% set index = loop.index %}
           <section class="city-card" data-city-card aria-labelledby="city-card-title-{{ index }}">
@@ -111,11 +111,14 @@
           </section>
         {% endfor %}
 
-        <div class="travel-form__footer">
-          <a class="travel-exit" href="{{ url_for('unable_to_name_cities') }}">I can't name 5 cities from the past 3 years</a>
-          <button class="button travel-primary" type="submit">Continue <span aria-hidden="true">→</span></button>
-        </div>
       </form>
+
+      <div class="travel-form__footer">
+        <form class="travel-exit-form" method="post" action="{{ url_for('unable_to_name_cities') }}">
+          <button class="travel-exit" type="submit">I can't name 5 cities from the past 3 years</button>
+        </form>
+        <button class="button travel-primary" type="submit" form="travel-form">Continue <span aria-hidden="true">→</span></button>
+      </div>
     </section>
   </main>
 </body>

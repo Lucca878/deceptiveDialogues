@@ -486,9 +486,16 @@ h1 {
 }
 
 .travel-exit {
+  padding: 0;
+  border: 0;
+  background: none;
   color: var(--muted);
+  font: inherit;
   font-size: 0.875rem;
+  text-align: left;
+  text-decoration: underline;
   text-underline-offset: 0.2em;
+  cursor: pointer;
 }
 
 .travel-exit:hover {
