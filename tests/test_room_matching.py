@@ -1,12 +1,16 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import unittest
+from unittest.mock import patch
 
 import server
 
 
 class RoomMatchingTests(unittest.TestCase):
     def setUp(self):
+        config = patch.dict(server.app.config, TURNSTILE_ENABLED=False)
+        config.start()
+        self.addCleanup(config.stop)
         self.clients = {}
         with server.rooms_lock:
             server.rooms.clear()

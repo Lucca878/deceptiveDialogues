@@ -1,11 +1,15 @@
 from concurrent.futures import ThreadPoolExecutor
 import unittest
+from unittest.mock import patch
 
 import server
 
 
 class RoleReadinessTests(unittest.TestCase):
     def setUp(self):
+        config = patch.dict(server.app.config, TURNSTILE_ENABLED=False)
+        config.start()
+        self.addCleanup(config.stop)
         with server.rooms_lock:
             server.rooms.clear()
         self.first = self.eligible_client()

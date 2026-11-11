@@ -24,6 +24,66 @@ npm run dev          # build TypeScript and start the Flask development server
 
 The Conda environment pins Python to 3.12 and installs Flask. Open <http://localhost:8000/> after the server starts. Stop it with `Ctrl+C`.
 
+### Optional Cloudflare Turnstile entry verification
+
+**Not active by default.** `TURNSTILE_ENABLED` defaults to `false`; adding this code or
+supplying keys alone does not enable verification. To activate it, create a Cloudflare
+Turnstile widget in **Managed** mode, configure its permitted hostnames in Cloudflare,
+and supply the following environment variables before starting/restarting Flask:
+
+| Variable | Required value when enabled |
+| --- | --- |
+| `TURNSTILE_ENABLED` | `true` (also accepts `1`, `yes`, `on`) |
+| `TURNSTILE_SITE_KEY` | The widget's public site key; intentionally rendered in HTML |
+| `TURNSTILE_SECRET_KEY` | The private server-side validation key; never put it in browser code or Git |
+| `TURNSTILE_HOSTNAMES` | Explicit comma-separated, exact hostnames, without schemes, ports or paths; for example `lpstudies.net` in production, or `localhost` for a separately configured local widget |
+| `FLASK_SECRET_KEY` | A strong randomly generated signing secret, stored securely and kept stable across process restarts; not the Turnstile secret |
+
+The hostnames must match both the Cloudflare widget configuration and the server's
+explicit allowlist. The request's Host header never adds an allowed hostname.
+When enabled, missing keys, an empty allowlist, or a missing stable signing key return
+HTTP 503 rather than bypassing verification. No generated development signing key is
+used when enabled at startup. When disabled, the existing temporary development key
+fallback remains available; production should still set a stable `FLASK_SECRET_KEY`.
+
+Verification runs **before landing and consent**, and protects all registered study
+pages and all read/write APIs globally. Only verification and public static files are
+exempt; unknown routes remain 404. The calm entry page discloses Cloudflare's processing
+of technical/browser information and IP addresses, links its privacy information, and
+explains that verification is not study consent. Turnstile's script loads on this page
+before consent; review the provider relationship, lawful basis, ethics approval,
+information letter and accessibility/support arrangements before participant use.
+People without JavaScript or access to Cloudflare cannot enter while enabled.
+
+The server validates each submitted token via an HTTPS POST to Cloudflare using only
+Python's standard library. The request uses a five-second network timeout and reads
+at most 16 KiB plus one overflow-detection byte. This is a socket/network timeout,
+not an absolute end-to-end deadline. Only strict boolean success, action `study-entry`,
+and an allowlisted hostname grant access. Missing, duplicate, empty or over-2048-character
+tokens are rejected locally. Invalid responses and network/JSON failures fail closed
+with a retry page. No token, private key, additional mouse tracking, or duplicate IP
+record is stored by this integration; the optional `remoteip` field is not sent.
+Cloudflare still receives the browser's IP through the widget, and existing web-server
+access logs are unaffected. Do not configure request-body or secret logging upstream.
+
+Success adds a signed-session verification flag and a configuration fingerprint,
+preserving consent, screening, screen-out and room progress, including on GET `/start`.
+It always redirects to landing, never to a `next` URL, and never replays an interrupted
+POST. API denials are JSON HTTP 403 with `error` and `verification_url`, not HTML
+redirects (configuration failures are HTTP 503). Verification responses and all enabled
+non-static responses use `Cache-Control: no-store`; proxy/CDN configuration must also
+avoid caching study pages/APIs and must not override this header.
+
+There is no repeated challenge during a conversation in the same valid session.
+Changing the site key, validation secret or hostname allowlist invalidates its
+verification fingerprint; changing the signing key invalidates the entire session
+and its study progress. Disabling and re-enabling with identical configuration does
+not revoke old signed cookies; use a new site key/configuration if revocation is needed.
+Turnstile is a bot-resistance measure, **not identity authentication, one-person-one-entry,
+CSRF protection, rate limiting, or proof that later messages were written by a person**.
+Cookies can be copied, and clearing them requires a new check. Existing process-memory
+storage and protocol limitations remain unchanged.
+
 The study flow is landing → consent → travel introduction → one questionnaire at `/travel-cities` → shared explanation at `/instructions` → **Find a partner** → automatic matching at `/room` → private instructions at `/role-instructions` → each selects **I'm ready** → chat at `/dialogue` only when both are ready. England eligibility is handled by Prolific only; the app asks no location question. The questionnaire shows all 20 preset English cities in the fixed order defined in [city_candidates.py](city_candidates.py), with stable slug IDs and England as their country. For every city, participants must answer Yes/No to visiting in the past 3 years and rate familiarity from 1 to 7. The server validates all 40 fields before checking eligibility: at least five Yes and at least five No answers are required (5–15 Yes inclusive). Familiarity does not affect eligibility. Invalid or missing answers return HTTP 400 with valid selections preserved, not a screen-out. The form needs no JavaScript.
 
 Questionnaire answers are validated then discarded; only consent, introduction progress, and eligibility/completion flags remain in the signed browser session. The versioned completion marker prevents old screening completions from opening the room. Consent and the introduction are prerequisites; room, dialogue, and every room API enforce screening and instructions continuation server-side. Screen-out remains in force on return visits in the same session, including through Start or renewed consent. Clearing cookies or changing browser sessions can reset this prototype state; Prolific identity is not yet authenticated by the app.
@@ -44,6 +104,7 @@ For local pair testing, use **two separate browser profiles or private contexts*
 deceptiveDialogues/
 ├── app/                    # everything served to the browser
 │   ├── templates/          # HTML pages rendered by Flask
+│   │   ├── verify_human.html
 │   │   ├── landing.html
 │   │   ├── consent.html
 │   │   ├── travel_intro.html
@@ -95,6 +156,17 @@ pre-match continuation and return progress, full room capacity, concurrent match
 private role rendering, session-bound authorization, readiness retries/refreshes/concurrency,
 both-ready API gating, and private server-generated message timestamps.
 
+Entry-verification tests use mocked Cloudflare replies only; they need no real keys,
+network access or new dependencies. Existing study-test fixtures explicitly disable
+Turnstile; there is no `TESTING`-based production bypass. Run the focused suite with
+`python -m unittest discover -s tests -p test_human_verification.py -v`, then the full
+backend command above, `npm run typecheck`, `npm run build`, and `git diff --check`.
+For a later manual smoke test, configure a Managed widget and matching environment,
+restart locally, and confirm entry/direct-page/API blocking, successful landing-only
+continuation and preserved study progress. Separately test a fresh browser session
+and an unavailable-provider/configuration scenario. Mocked tests cannot certify the
+live Cloudflare configuration, third-party widget accessibility, or production caching.
+
 ## Tech stack
 
 - **Frontend:** TypeScript (compiled with esbuild), HTML, plain CSS; no frontend framework
@@ -114,6 +186,25 @@ _To be documented: what is stored, in which format, and how it is exported._
 Study 2 is deployed from the public Git repository `https://github.com/Lucca878/deceptiveDialogues` to `/var/www/study2` on the Hetzner VPS. It runs as a single Gunicorn worker on `127.0.0.1:8001`. Its systemd unit and Nginx config are in `deploy/study2.service` and `deploy/study2.nginx.conf`.
 
 ### Deploy an update
+
+#### One-time environment configuration for verification (manual, not performed here)
+
+[deploy/study2.service](deploy/study2.service) includes the optional systemd directive
+`EnvironmentFile=-/etc/study2.env`. Create that environment file on the server as
+root-owned, mode **0600**, outside the checkout, and enter the variables listed above
+there using systemd `NAME=value` syntax (no `export`). Keep all private values out of
+Git, screenshots and command history. The leading minus makes the file optional:
+without an explicit enable setting the feature remains **off**, not auto-enabled.
+Schedule activation outside participant sessions: restarting clears rooms and chats.
+
+Installing the updated unit requires a separate manual step on the server:
+`cp /var/www/study2/deploy/study2.service /etc/systemd/system/study2.service`, then
+`systemctl daemon-reload` and `systemctl restart study2.service`. Check
+`systemctl status study2.service --no-pager` without dumping environment secrets.
+After later edits to the environment file, restart the service; after unit-file edits,
+run `daemon-reload` before restarting. [deploy.sh](deploy.sh) neither installs the unit
+nor runs `daemon-reload`; its ordinary application restart does not install these
+configuration changes. No production keys or configuration are supplied by this repo.
 
 First, test the change locally, then commit and push it to the `main` branch.
 From the repository root on your Mac, run:

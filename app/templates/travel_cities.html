@@ -10,7 +10,7 @@
   <main class="travel-page travel-page--form">
     <section class="travel-form-wrap" aria-labelledby="cities-title">
       <h1 id="cities-title">Your travels</h1>
-      <p class="travel-lead">For each of these 20 cities in England, tell us whether you have visited in the past 3 years, even briefly, and how well you know it, for example from friends, films, the news or school. Please answer both questions for every city.</p>
+      <p class="travel-lead">For each of these 20 cities in England, tell us whether you have visited in the past 3 years, even briefly, and how well you know it. Please answer both questions for every city.</p>
       {% if errors %}<p role="alert" class="field-error">Please complete or correct the highlighted questions below. Your valid selections have been kept.</p>{% endif %}
 
       <form method="post" action="{{ url_for('travel_cities') }}">

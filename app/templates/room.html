@@ -10,8 +10,17 @@
   <main class="travel-page">
     <section class="travel-card travel-intro" aria-labelledby="room-title">
       <h1 id="room-title">Join a conversation</h1>
-      <p class="travel-lead">We will automatically match you with another participant. Your role instructions will open when you are paired.</p>
-      <p class="travel-supporting" id="room-status" role="status" aria-live="polite">Finding another participant…</p>
+      <p class="travel-lead">We will automatically match you with another participant. You will receive more detailed instructions once you are paired.</p>
+      <div class="matching-progress" id="matching-progress" hidden>
+        <div class="matching-ring" id="matching-ring" aria-hidden="true" hidden></div>
+        <ol class="matching-steps" role="list" aria-label="Matching steps">
+          <li id="matching-step-finding">Finding a partner</li>
+          <li id="matching-step-paired">Paired</li>
+          <li>Detailed instructions</li>
+        </ol>
+        <button class="matching-motion-toggle" id="matching-motion-toggle" type="button" aria-pressed="false" aria-controls="matching-ring" hidden>Pause animation</button>
+      </div>
+      <p class="travel-supporting" id="room-status" role="status" aria-live="polite" hidden>Finding another participant…</p>
       <button class="button button-agree" id="retry-matching" type="button" hidden>Try again</button>
       <noscript><p>JavaScript must be enabled to match you with another participant.</p></noscript>
     </section>

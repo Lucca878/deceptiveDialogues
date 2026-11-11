@@ -261,6 +261,94 @@ h1 {
   color: var(--muted);
 }
 
+/* ---------- Matching: actual stages, not estimated progress ---------- */
+.matching-progress {
+  margin: 2rem 0 1.5rem;
+}
+
+.matching-ring {
+  width: 3rem;
+  height: 3rem;
+  margin: 0 auto 1.5rem;
+  border: 3px solid var(--line);
+  border-top-color: var(--muted);
+  border-radius: 50%;
+}
+
+.matching-ring--animated {
+  animation: matching-rotate 2.4s linear infinite;
+}
+
+.matching-steps {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.6rem 1rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.matching-steps li {
+  padding: 0.45rem 0.65rem;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+}
+
+.matching-steps [aria-current="step"] {
+  border-color: var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.matching-motion-toggle {
+  min-height: 2.75rem;
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border: 0;
+  border-radius: 0.5rem;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.8125rem;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+  cursor: pointer;
+}
+
+.matching-motion-toggle:hover {
+  color: var(--ink);
+}
+
+.matching-motion-toggle:focus-visible {
+  outline: 3px solid var(--button);
+  outline-offset: 3px;
+}
+
+@keyframes matching-rotate {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 38rem) {
+  .matching-steps {
+    flex-direction: column;
+    align-items: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .matching-ring--animated {
+    animation: none;
+  }
+
+  .matching-motion-toggle {
+    display: none;
+  }
+}
+
 .travel-primary {
   display: inline-flex;
   align-items: center;

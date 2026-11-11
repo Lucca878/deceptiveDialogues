@@ -1,21 +1,163 @@
 from datetime import datetime, timezone
 from functools import wraps
+from hashlib import sha256
+from http.client import HTTPException
+import json
 from os import environ
 from secrets import choice
 from secrets import token_hex
 from threading import Lock
 from time import monotonic
+from urllib.error import URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
 from city_candidates import CANDIDATE_CITIES
 
 app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
-app.config["SECRET_KEY"] = environ.get("FLASK_SECRET_KEY") or token_hex(32)
+app.config.update(
+    TURNSTILE_ENABLED=environ.get("TURNSTILE_ENABLED", "false").strip().lower() in ("true", "1", "yes", "on"),
+    TURNSTILE_SITE_KEY=environ.get("TURNSTILE_SITE_KEY", "").strip(),
+    TURNSTILE_SECRET_KEY=environ.get("TURNSTILE_SECRET_KEY", "").strip(),
+    TURNSTILE_HOSTNAMES=tuple(sorted({
+        host.strip() for host in environ.get("TURNSTILE_HOSTNAMES", "").split(",") if host.strip()
+    })),
+    FLASK_SECRET_KEY=environ.get("FLASK_SECRET_KEY", "").strip(),
+)
+# A generated development key must never count as a configured verification key.
+app.config["SECRET_KEY"] = app.config["FLASK_SECRET_KEY"] or (
+    None if app.config["TURNSTILE_ENABLED"] else token_hex(32)
+)
 rooms = {}
 rooms_lock = Lock()
 ROOM_CODES = tuple(f"ROOM{number:02d}" for number in range(1, 21))
 SCREENING_VERSION = "english-cities-v1"
+TURNSTILE_ACTION = "study-entry"
+TURNSTILE_TIMEOUT_SECONDS = 5
+TURNSTILE_MAX_RESPONSE_BYTES = 16384
+
+
+def _human_verification_configured():
+    return all((
+        app.config["TURNSTILE_SITE_KEY"],
+        app.config["TURNSTILE_SECRET_KEY"],
+        app.config["TURNSTILE_HOSTNAMES"],
+        app.config["FLASK_SECRET_KEY"],
+        app.config["SECRET_KEY"] == app.config["FLASK_SECRET_KEY"],
+    ))
+
+
+def _human_verification_fingerprint():
+    # No key or token is stored in the signed (readable) browser session.
+    configuration = json.dumps([
+        app.config["TURNSTILE_ENABLED"], app.config["TURNSTILE_SITE_KEY"],
+        app.config["TURNSTILE_SECRET_KEY"], sorted(app.config["TURNSTILE_HOSTNAMES"]),
+        TURNSTILE_ACTION,
+    ])
+    return sha256(configuration.encode("utf-8")).hexdigest()
+
+
+def _human_verified():
+    return (
+        session.get("human_verified") is True
+        and session.get("human_verification_config") == _human_verification_fingerprint()
+    )
+
+
+def _verification_unavailable():
+    message = "Entry verification is temporarily unavailable. Please try again later."
+    if request.path.startswith("/api/"):
+        return jsonify(error=message, verification_url=url_for("verify_human")), 503
+    return render_template("verify_human.html", error=message, site_key=None), 503
+
+
+@app.before_request
+def require_human_verification():
+    if (
+        not app.config["TURNSTILE_ENABLED"]
+        or request.endpoint in (None, "static", "verify_human")
+    ):
+        return None
+    if not _human_verification_configured():
+        return _verification_unavailable()
+    if _human_verified():
+        return None
+    if request.path.startswith("/api/"):
+        return jsonify(
+            error="Please complete entry verification before continuing.",
+            verification_url=url_for("verify_human"),
+        ), 403
+    # Never replay a blocked POST or accept a browser-supplied redirect target.
+    return redirect(url_for("verify_human"))
+
+
+@app.after_request
+def prevent_verification_caching(response):
+    if request.endpoint == "verify_human" or (
+        app.config["TURNSTILE_ENABLED"] and request.endpoint != "static"
+    ):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.route("/verify-human", methods=["GET", "POST"])
+def verify_human():
+    if not app.config["TURNSTILE_ENABLED"]:
+        return redirect(url_for("landing"))
+    if not _human_verification_configured():
+        return _verification_unavailable()
+    if _human_verified():
+        return redirect(url_for("landing"))
+
+    error = None
+    status_code = 200
+    if request.method == "POST":
+        tokens = request.form.getlist("cf-turnstile-response")
+        token = tokens[0] if len(tokens) == 1 else ""
+        if not token.strip() or len(token) > 2048:
+            error = "Please complete the verification below and try again."
+            status_code = 400
+        else:
+            verification_request = Request(
+                "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+                data=urlencode({
+                    "secret": app.config["TURNSTILE_SECRET_KEY"], "response": token,
+                }).encode("utf-8"),
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            try:
+                with urlopen(verification_request, timeout=TURNSTILE_TIMEOUT_SECONDS) as upstream:
+                    raw = upstream.read(TURNSTILE_MAX_RESPONSE_BYTES + 1)
+                if len(raw) > TURNSTILE_MAX_RESPONSE_BYTES:
+                    raise ValueError("Verification response exceeds limit")
+                result = json.loads(raw)
+                if not isinstance(result, dict) or type(result.get("success")) is not bool:
+                    raise ValueError("Invalid verification response")
+                if result["success"] is True and (
+                    not isinstance(result.get("action"), str)
+                    or not isinstance(result.get("hostname"), str)
+                ):
+                    raise ValueError("Invalid verification response")
+                if (
+                    result["success"] is True
+                    and result.get("action") == TURNSTILE_ACTION
+                    and result.get("hostname") in app.config["TURNSTILE_HOSTNAMES"]
+                ):
+                    session["human_verified"] = True
+                    session["human_verification_config"] = _human_verification_fingerprint()
+                    return redirect(url_for("landing"))
+                error = "Verification was not successful. Please complete a new check and try again."
+                status_code = 400
+            except (URLError, OSError, HTTPException, ValueError, RecursionError):
+                # Do not log exceptions: upstream messages can contain submitted secrets.
+                error = "Verification could not be completed. Please try the check again."
+                status_code = 503
+    return render_template(
+        "verify_human.html", error=error, site_key=app.config["TURNSTILE_SITE_KEY"],
+    ), status_code
 
 
 def consent_required(view):

@@ -24,6 +24,37 @@ function getElement<T extends Element>(selector: string): T {
 
 const retryButton = getElement<HTMLButtonElement>("#retry-matching"); // The button to retry finding a partner
 const roomStatus = getElement<HTMLParagraphElement>("#room-status"); // The paragraph element displaying the room status
+const matchingProgress = getElement<HTMLDivElement>("#matching-progress");
+const matchingRing = getElement<HTMLDivElement>("#matching-ring");
+const motionToggle = getElement<HTMLButtonElement>("#matching-motion-toggle");
+const findingStep = getElement<HTMLLIElement>("#matching-step-finding");
+const pairedStep = getElement<HTMLLIElement>("#matching-step-paired");
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+let matchingStage: "waiting" | "paired" | "error" = "waiting";
+let animationPaused = false;
+
+function updateMatchingDisplay(): void {
+  const waiting = matchingStage === "waiting";
+  matchingRing.hidden = !waiting;
+  matchingRing.classList.toggle("matching-ring--animated", waiting && !animationPaused && !reducedMotion.matches);
+  motionToggle.hidden = !waiting || reducedMotion.matches;
+  motionToggle.disabled = reducedMotion.matches;
+  motionToggle.setAttribute("aria-pressed", String(animationPaused));
+  motionToggle.textContent = animationPaused ? "Resume animation" : "Pause animation";
+
+  findingStep.removeAttribute("aria-current");
+  pairedStep.removeAttribute("aria-current");
+  if (waiting) findingStep.setAttribute("aria-current", "step");
+  if (matchingStage === "paired") pairedStep.setAttribute("aria-current", "step");
+  // Detailed instructions remain upcoming until the browser navigates there.
+}
+
+motionToggle.addEventListener("click", () => {
+  animationPaused = !animationPaused;
+  updateMatchingDisplay();
+});
+reducedMotion.addEventListener("change", updateMatchingDisplay);
 
 sessionStorage.removeItem("chat-role"); // Clears the stored chat role
 sessionStorage.removeItem("chat-room-code"); // Clears the stored chat room code
@@ -44,6 +75,8 @@ Promise<RoomResponse> {
 } // Reads and parses the JSON response from the server, throwing an error if the response is not OK
 
 function showRequestError(error: unknown, fallback: string): void {
+  matchingStage = "error";
+  updateMatchingDisplay();
   roomStatus.textContent = error instanceof Error ? error.message : fallback;
   retryButton.hidden = error instanceof RoomRequestError && error.status >= 400 && error.status < 500;
 }
@@ -53,6 +86,8 @@ function enterDialogue(code: string, role: Role): void {
   sessionStorage.removeItem("pending-room-code");
   sessionStorage.setItem("chat-room-code", code);
   sessionStorage.setItem("chat-role", role);
+  matchingStage = "paired";
+  updateMatchingDisplay();
   window.location.assign("/role-instructions");
 } // Handles entering the dialogue page with the assigned room code and role
 
@@ -80,6 +115,10 @@ function waitForRoom(code: string): void { // Displays a waiting message and sta
 
 async function findPartner(): Promise<void> { // Initiates the process of finding a partner for the participant
   if (pollingTimer !== undefined) window.clearTimeout(pollingTimer); // Clears any existing polling timer before starting a new partner search
+  matchingStage = "waiting";
+  updateMatchingDisplay();
+  matchingProgress.hidden = false;
+  roomStatus.hidden = false;
   retryButton.hidden = true; // Hides the retry button while searching for a partner
   roomStatus.textContent = "Finding another participant…"; // Updates the room status message to indicate that the system is searching for a partner
 

@@ -1,5 +1,6 @@
 from html.parser import HTMLParser
 import unittest
+from unittest.mock import patch
 
 from werkzeug.datastructures import MultiDict
 
@@ -56,6 +57,9 @@ class FormParser(HTMLParser):
 
 class TravelScreeningTests(unittest.TestCase):
     def setUp(self):
+        config = patch.dict(server.app.config, TURNSTILE_ENABLED=False)
+        config.start()
+        self.addCleanup(config.stop)
         self.client = server.app.test_client()
         with server.rooms_lock:
             server.rooms.clear()

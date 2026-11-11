@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Entry verification | The Deception Game</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  {% if site_key %}
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+  {% endif %}
+</head>
+<body>
+  <main class="travel-page">
+    <section class="travel-card travel-intro" aria-labelledby="verification-title">
+      <h1 id="verification-title">Entry verification</h1>
+      <p class="travel-lead">Please complete this check before entering the study.</p>
+      <p>This security check uses Cloudflare Turnstile before the study information and consent page. Cloudflare receives technical information, including your IP address and browser information, to help distinguish people from automated traffic. Completing the check does not mean you have consented to the study.</p>
+      <p>Read <a href="https://www.cloudflare.com/privacypolicy/">Cloudflare’s Privacy Policy</a> and <a href="https://www.cloudflare.com/cloudflare-customer-dpa/">Cloudflare’s Data Processing Addendum</a>. You may leave this page without joining the study.</p>
+      {% if error %}
+      <p role="alert">{{ error }}</p>
+      {% endif %}
+      {% if site_key %}
+      <form method="post" action="{{ url_for('verify_human') }}" aria-labelledby="verification-title">
+        <div class="cf-turnstile" data-sitekey="{{ site_key }}" data-action="study-entry" data-size="flexible" data-theme="light"></div>
+        <p class="travel-supporting">Once the check is complete, select Continue. If the check does not load, enable JavaScript and allow challenges.cloudflare.com, then reload this page.</p>
+        <button class="button travel-primary" type="submit">Continue</button>
+      </form>
+      <noscript><p>JavaScript is required for entry verification. Please enable JavaScript and reload this page to continue. Without verification, the study cannot be opened.</p></noscript>
+      {% else %}
+      <a class="button travel-primary" href="{{ url_for('verify_human') }}">Try again</a>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>
