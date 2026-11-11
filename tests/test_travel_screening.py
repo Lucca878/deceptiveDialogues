@@ -36,6 +36,8 @@ class FormParser(HTMLParser):
         self.inputs = []
         self.headings = []
         self.scripts = []
+        self.forms = []
+        self.buttons = []
         self.feed(response.get_data(as_text=True))
 
     def handle_starttag(self, tag, attrs):
@@ -46,6 +48,10 @@ class FormParser(HTMLParser):
             self.headings.append(attrs.get("id"))
         if tag == "script":
             self.scripts.append(attrs)
+        if tag == "form":
+            self.forms.append(attrs)
+        if tag == "button":
+            self.buttons.append(attrs)
 
 
 class TravelScreeningTests(unittest.TestCase):
@@ -62,8 +68,8 @@ class TravelScreeningTests(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["Location"], path)
 
-    def accept_consent(self):
-        self.assert_redirect(self.client.post("/consent", data={"decision": "accept"}), "/travel-intro")
+    def accept_consent(self, destination="/travel-intro"):
+        self.assert_redirect(self.client.post("/consent", data={"decision": "accept"}), destination)
 
     def begin_screening(self):
         self.accept_consent()
@@ -77,8 +83,9 @@ class TravelScreeningTests(unittest.TestCase):
         return data
 
     def assert_all_gates_blocked(self, destination):
-        for path in ("/room", "/dialogue"):
+        for path in ("/room", "/dialogue", "/role-instructions"):
             self.assert_redirect(self.client.get(path), destination)
+        self.assert_redirect(self.client.post("/role-instructions"), destination)
         for method, path in (
             ("POST", "/api/rooms"),
             ("GET", "/api/rooms/ROOM01?participant_id=test"),
@@ -135,14 +142,13 @@ class TravelScreeningTests(unittest.TestCase):
                 self.begin_screening()
                 eligible = 5 <= yes_count <= 15
                 response = self.client.post("/travel-cities", data=self.answers(yes_count))
-                self.assert_redirect(response, "/room" if eligible else "/screened-out-cities")
+                self.assert_redirect(response, "/instructions" if eligible else "/screened-out-cities")
                 with self.client.session_transaction() as browser_session:
                     expected = {"consent_accepted": True, "travel_intro_seen": True}
                     expected.update({"travel_screening_complete": server.SCREENING_VERSION} if eligible else {"travel_screened_out": True})
                     self.assertEqual(dict(browser_session), expected)
                 if eligible:
-                    self.assertEqual(self.client.get("/room").status_code, 200)
-                    self.assertEqual(self.client.get("/dialogue").status_code, 200)
+                    self.assert_all_gates_blocked("/instructions")
                 else:
                     self.assert_all_gates_blocked("/screened-out-cities")
 
@@ -152,7 +158,7 @@ class TravelScreeningTests(unittest.TestCase):
                 with self.subTest(rating=rating, yes_count=yes_count):
                     self.client = server.app.test_client()
                     self.begin_screening()
-                    self.assert_redirect(self.client.post("/travel-cities", data=self.answers(yes_count, rating)), "/room" if 5 <= yes_count <= 15 else "/screened-out-cities")
+                    self.assert_redirect(self.client.post("/travel-cities", data=self.answers(yes_count, rating)), "/instructions" if 5 <= yes_count <= 15 else "/screened-out-cities")
 
     def test_invalid_or_missing_fields_return_400_preserve_selections_and_do_not_screen_out(self):
         for field in ("visited", "familiarity"):
@@ -174,7 +180,7 @@ class TravelScreeningTests(unittest.TestCase):
                         with self.client.session_transaction() as browser_session:
                             self.assertEqual(dict(browser_session), {"consent_accepted": True, "travel_intro_seen": True})
                         self.assert_all_gates_blocked("/travel-intro")
-                        self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/room")
+                        self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/instructions")
 
     def test_all_missing_fields_report_errors_before_eligibility(self):
         self.begin_screening()
@@ -210,13 +216,14 @@ class TravelScreeningTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.client = server.app.test_client()
                 with self.client.session_transaction() as browser_session:
-                    browser_session.update(consent_accepted=True, travel_intro_seen=True, travel_screening_complete=marker, other_cities_complete=True, other_city_ids=["paris"])
+                    browser_session.update(consent_accepted=True, travel_intro_seen=True, travel_screening_complete=marker, other_cities_complete=True, other_city_ids=["paris"], instructions_complete=True)
                 self.assert_all_gates_blocked("/travel-intro")
                 self.assertEqual(self.client.get("/travel-intro").status_code, 200)
                 self.assertEqual(self.client.get("/travel-cities").status_code, 200)
-                self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/room")
+                self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/instructions")
                 with self.client.session_transaction() as browser_session:
                     self.assertEqual(dict(browser_session), {"consent_accepted": True, "travel_intro_seen": True, "travel_screening_complete": server.SCREENING_VERSION})
+                self.assert_all_gates_blocked("/instructions")
 
     def test_current_completion_still_requires_intro_and_screen_out_takes_precedence(self):
         self.accept_consent()
@@ -228,13 +235,125 @@ class TravelScreeningTests(unittest.TestCase):
             browser_session["travel_screened_out"] = True
         self.assert_all_gates_blocked("/screened-out-cities")
 
-    def test_completed_participant_returns_to_room_without_resubmitting(self):
+    def test_completed_screening_returns_to_instructions_without_resubmitting(self):
         self.begin_screening()
         self.client.post("/travel-cities", data=self.answers())
-        self.accept_consent()
+        self.assert_redirect(self.client.get("/consent"), "/instructions")
+        self.accept_consent("/instructions")
         for method, path in (("GET", "/travel-intro"), ("POST", "/travel-intro"), ("GET", "/travel-cities"), ("POST", "/travel-cities")):
-            self.assert_redirect(self.client.open(path, method=method, data=self.answers(0)), "/room")
+            self.assert_redirect(self.client.open(path, method=method, data=self.answers(0)), "/instructions")
+        self.assert_all_gates_blocked("/instructions")
+
+    def test_instructions_get_and_post_require_consent_and_current_screening(self):
+        for state, destination in (
+            ({}, "/consent"),
+            ({"consent_accepted": True}, "/travel-intro"),
+            ({"consent_accepted": True, "travel_intro_seen": True}, "/travel-intro"),
+            ({"consent_accepted": True, "travel_intro_seen": True, "travel_screening_complete": "old-version"}, "/travel-intro"),
+            ({"consent_accepted": True, "travel_screening_complete": server.SCREENING_VERSION}, "/travel-intro"),
+            ({"travel_intro_seen": True, "travel_screening_complete": server.SCREENING_VERSION}, "/consent"),
+        ):
+            for method in ("GET", "POST"):
+                with self.subTest(state=state, method=method):
+                    self.client = server.app.test_client()
+                    with self.client.session_transaction() as browser_session:
+                        browser_session.update(state)
+                    self.assert_redirect(self.client.open("/instructions", method=method), destination)
+                    with self.client.session_transaction() as browser_session:
+                        self.assertEqual(dict(browser_session), state)
+
+    def test_instructions_get_is_shared_explanation_and_does_not_grant_access(self):
+        self.begin_screening()
+        self.client.post("/travel-cities", data=self.answers())
+        with self.client.session_transaction() as browser_session:
+            before = dict(browser_session)
+        response = self.client.get("/instructions")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b'<h1 id="instructions-title">Instructions</h1>', response.data)
+        self.assertIn(b"In the next part of this study, you will be matched with another human participant for a text conversation. After you have been paired, you will receive instructions for your assigned role.", response.data)
+        self.assertIn(b"Find a partner</button>", response.data)
+        form = FormParser(response)
+        self.assertEqual(form.forms, [{"method": "post", "action": "/instructions"}])
+        self.assertEqual(form.buttons, [{"class": "button travel-primary", "type": "submit"}])
+        self.assertEqual(form.scripts, [])
+        self.assertEqual(self.client.get("/instructions").data, response.data)
+        with self.client.session_transaction() as browser_session:
+            self.assertEqual(dict(browser_session), before)
+        self.assert_all_gates_blocked("/instructions")
+
+    def test_instructions_post_grants_matching_but_not_dialogue_access(self):
+        self.begin_screening()
+        self.client.post("/travel-cities", data=self.answers())
+        self.assert_redirect(self.client.post("/instructions"), "/room")
+        with self.client.session_transaction() as browser_session:
+            self.assertIs(browser_session["instructions_complete"], True)
+        self.assertEqual(self.client.get("/room").status_code, 200)
+        self.assert_redirect(self.client.get("/dialogue"), "/room")
         self.assertEqual(self.client.post("/api/rooms", json={"participant_id": "test"}).status_code, 200)
+        self.assertEqual(self.client.post("/api/rooms", json={"participant_id": "partner"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/rooms/ROOM01?participant_id=test").status_code, 200)
+        self.assertEqual(self.client.post("/api/rooms/ROOM01/messages", json={"participant_id": "test", "text": "Hello"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/rooms/ROOM01/messages?participant_id=test").status_code, 403)
+        self.assertEqual(self.client.post("/api/rooms/ROOM01/typing", json={"participant_id": "test"}).status_code, 403)
+        self.assert_redirect(self.client.get("/instructions"), "/room")
+        self.assert_redirect(self.client.post("/instructions"), "/room")
+
+    def test_return_and_renewed_consent_retain_instructions_progress(self):
+        self.begin_screening()
+        self.client.post("/travel-cities", data=self.answers())
+        self.client.post("/instructions")
+        self.assert_redirect(self.client.get("/start"), "/consent")
+        self.assert_redirect(self.client.get("/consent"), "/instructions")
+        for decision in ("accept", "deny", "accept"):
+            response = self.client.post("/consent", data={"decision": decision})
+            if decision == "deny":
+                self.assertEqual(response.status_code, 200)
+                self.assert_redirect(self.client.post("/instructions"), "/consent")
+            else:
+                self.assert_redirect(response, "/instructions")
+            with self.client.session_transaction() as browser_session:
+                self.assertIs(browser_session["instructions_complete"], True)
+        for method, path in (("GET", "/travel-intro"), ("POST", "/travel-intro"), ("GET", "/travel-cities"), ("POST", "/travel-cities")):
+            self.assert_redirect(self.client.open(path, method=method, data=self.answers(0)), "/instructions")
+        self.assert_redirect(self.client.get("/instructions"), "/room")
+        self.assertEqual(self.client.post("/api/rooms", json={"participant_id": "test"}).status_code, 200)
+
+    def test_new_screening_outcome_invalidates_obsolete_instructions_progress(self):
+        for yes_count in (4, 5):
+            with self.subTest(yes_count=yes_count):
+                self.client = server.app.test_client()
+                self.begin_screening()
+                with self.client.session_transaction() as browser_session:
+                    browser_session["instructions_complete"] = True
+                destination = "/instructions" if yes_count == 5 else "/screened-out-cities"
+                self.assert_redirect(self.client.post("/travel-cities", data=self.answers(yes_count)), destination)
+                with self.client.session_transaction() as browser_session:
+                    self.assertNotIn("instructions_complete", browser_session)
+                self.assert_all_gates_blocked(destination)
+
+    def test_screenout_blocks_instructions_even_with_obsolete_completion_flags(self):
+        self.begin_screening()
+        self.client.post("/travel-cities", data=self.answers(4))
+        for stale_progress in (False, True):
+            with self.subTest(stale_progress=stale_progress):
+                if stale_progress:
+                    with self.client.session_transaction() as browser_session:
+                        browser_session.update(travel_screening_complete=server.SCREENING_VERSION, instructions_complete=True)
+                for method in ("GET", "POST"):
+                    self.assert_redirect(self.client.open("/instructions", method=method), "/screened-out-cities")
+                with self.client.session_transaction() as browser_session:
+                    self.assertEqual(browser_session.get("instructions_complete"), True if stale_progress else None)
+                self.assert_all_gates_blocked("/screened-out-cities")
+
+    def test_instructions_flag_must_be_boolean_true(self):
+        self.begin_screening()
+        self.client.post("/travel-cities", data=self.answers())
+        for marker in (False, "true", 1):
+            with self.subTest(marker=marker):
+                with self.client.session_transaction() as browser_session:
+                    browser_session["instructions_complete"] = marker
+                self.assertEqual(self.client.get("/instructions").status_code, 200)
+                self.assert_all_gates_blocked("/instructions")
 
     def test_obsolete_routes_are_absent_and_screenout_page_is_gated(self):
         for path in ("/other-cities", "/travel-cities/unable"):

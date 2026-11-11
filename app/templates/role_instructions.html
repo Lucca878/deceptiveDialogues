@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Role instructions | The Deception Game</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <main class="travel-page">
+    <section class="travel-card role-instructions-card" aria-labelledby="role-instructions-title" id="role-instructions" data-room-code="{{ code }}" data-ready="{{ 'true' if ready else 'false' }}">
+      <h1 id="role-instructions-title">Your instructions</h1>
+      {% if ready %}
+      <p class="travel-lead" id="readiness-status" role="status" aria-live="polite">Waiting for your partner. Please keep this page open.</p>
+      {% else %}
+      {% if role == 'interviewer' %}
+      <p class="travel-lead">You are the <strong>interviewer</strong>.</p>
+      <p>You will have a text conversation with another human participant, the interviewee. Your task is to decide whether their claim about visiting a city is true.</p>
+      <h2>How each conversation works</h2>
+      <ol class="role-instructions-steps">
+        <li><strong>Read the claim.</strong> Your partner begins with a claim about visiting a city, for example:
+          <blockquote>“I have been to Liverpool in the past three years.”</blockquote>
+        </li>
+        <li><strong>Ask 10 questions.</strong> You and your partner take turns: one question from you, followed by one answer from your partner. When you have finished your question, click <strong>Question complete</strong> so your partner can answer.</li>
+        <li><strong>Make your judgment.</strong> After your tenth question has been answered, decide whether the claim is true or false. Then rate how confident you are in your judgment, from <strong>0% to 100%</strong>.</li>
+      </ol>
+      {% elif role == 'interviewee' %}
+      <p class="travel-lead">You are the <strong>interviewee</strong>.</p>
+      <p>You will have a text conversation with another human participant, the interviewer. Your task is to convince them that your claim about visiting a city is true.</p>
+      <h2>How each conversation works</h2>
+      <ol class="role-instructions-steps">
+        <li><strong>Follow your assignment.</strong> For each conversation, you will be instructed to tell the truth or to lie about visiting a city in the past three years. Begin with the city claim for that conversation.</li>
+        <li><strong>Answer 10 questions.</strong> You and your partner take turns: one question from the interviewer, followed by one answer from you. Follow your truth-or-lie assignment throughout the conversation.</li>
+        <li><strong>Wait for the judgment.</strong> After your tenth answer, the interviewer will decide whether your claim is true or false and rate their confidence from <strong>0% to 100%</strong>.</li>
+      </ol>
+      {% endif %}
+      <p class="travel-supporting">You will complete <strong>10 conversations with the same partner</strong>. Select “I'm ready” when you have read these instructions. The dialogue will open once you are both ready.</p>
+      <form class="role-instructions-actions" method="post" action="{{ url_for('role_instructions') }}">
+        <button class="button travel-primary" type="submit">I'm ready</button>
+      </form>
+      {% endif %}
+      <noscript><p>JavaScript is required to continue automatically. Refresh this page to check whether the conversation is available.</p></noscript>
+    </section>
+  </main>
+  <script src="{{ url_for('static', filename='js/role_instructions.js') }}" defer></script>
+</body>
+</html>

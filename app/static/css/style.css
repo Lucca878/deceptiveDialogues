@@ -215,6 +215,35 @@ h1 {
   text-align: center;
 }
 
+.role-instructions-card {
+  width: min(100%, 48rem);
+  text-align: left;
+}
+
+.role-instructions-card h2 {
+  margin: 1.75rem 0 0.75rem;
+  font-size: 1.15rem;
+}
+
+.role-instructions-steps {
+  display: grid;
+  gap: 1rem;
+  margin: 0 0 1.5rem;
+  padding-left: 1.5rem;
+}
+
+.role-instructions-steps blockquote {
+  margin: 0.75rem 0 0;
+  padding: 0.75rem 1rem;
+  border-left: 3px solid var(--line);
+  background: var(--paper);
+}
+
+.role-instructions-actions {
+  display: flex;
+  justify-content: center;
+}
+
 .travel-card h1,
 .travel-form-wrap h1 {
   font-size: clamp(2rem, 5vw, 3rem);

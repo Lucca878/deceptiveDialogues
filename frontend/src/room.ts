@@ -53,7 +53,7 @@ function enterDialogue(code: string, role: Role): void {
   sessionStorage.removeItem("pending-room-code");
   sessionStorage.setItem("chat-room-code", code);
   sessionStorage.setItem("chat-role", role);
-  window.location.assign("/dialogue");
+  window.location.assign("/role-instructions");
 } // Handles entering the dialogue page with the assigned room code and role
 
 async function checkRoomStatus(code: string): Promise<void> { // Checks the status of a specific room for the participant

@@ -7,6 +7,7 @@ import server
 
 class RoomMatchingTests(unittest.TestCase):
     def setUp(self):
+        self.clients = {}
         with server.rooms_lock:
             server.rooms.clear()
 
@@ -20,10 +21,13 @@ class RoomMatchingTests(unittest.TestCase):
             browser_session["consent_accepted"] = True
             browser_session["travel_intro_seen"] = True
             browser_session["travel_screening_complete"] = server.SCREENING_VERSION
+            browser_session["instructions_complete"] = True
         return client
 
     def match(self, participant_id):
-        return self.client().post("/api/rooms", json={"participant_id": participant_id})
+        if participant_id not in self.clients:
+            self.clients[participant_id] = self.client()
+        return self.clients[participant_id].post("/api/rooms", json={"participant_id": participant_id})
 
     def test_consecutive_people_share_room_and_receive_opposite_roles(self):
         first = self.match("first").get_json()
@@ -32,7 +36,7 @@ class RoomMatchingTests(unittest.TestCase):
         self.assertEqual(first, {"code": "ROOM01", "status": "waiting"})
         self.assertEqual(second["code"], "ROOM01")
         self.assertEqual(second["status"], "paired")
-        status = self.client().get("/api/rooms/ROOM01?participant_id=first").get_json()
+        status = self.clients["first"].get("/api/rooms/ROOM01?participant_id=first").get_json()
         self.assertEqual({status["role"], second["role"]}, {"interviewer", "interviewee"})
         self.assertEqual(third, {"code": "ROOM02", "status": "waiting"})
 
@@ -56,8 +60,10 @@ class RoomMatchingTests(unittest.TestCase):
 
     def test_concurrent_arrivals_never_overfill_or_duplicate_memberships(self):
         ids = [f"person-{index}" for index in range(2 * len(server.ROOM_CODES))]
+        self.clients = {pid: self.client() for pid in ids}
         with ThreadPoolExecutor(max_workers=8) as executor:
-            responses = list(executor.map(self.match, ids + ids))
+            responses = list(executor.map(self.match, ids))
+            responses += list(executor.map(self.match, ids))
         self.assertTrue(all(response.status_code == 200 for response in responses))
         self.assertEqual(len(server.rooms), len(server.ROOM_CODES))
         memberships = []
@@ -74,8 +80,11 @@ class RoomMatchingTests(unittest.TestCase):
 
     def test_message_timestamp_is_server_generated_and_not_exposed(self):
         client = self.client()
+        partner = self.client()
         client.post("/api/rooms", json={"participant_id": "first"})
-        client.post("/api/rooms", json={"participant_id": "second"})
+        partner.post("/api/rooms", json={"participant_id": "second"})
+        client.post("/role-instructions")
+        partner.post("/role-instructions")
 
         sent = client.post(
             "/api/rooms/ROOM01/messages",
