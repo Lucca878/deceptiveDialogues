@@ -1,8 +1,6 @@
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from functools import wraps
 from os import environ
-from random import SystemRandom
-import re
 from secrets import choice
 from secrets import token_hex
 from threading import Lock
@@ -17,299 +15,7 @@ app.config["SECRET_KEY"] = environ.get("FLASK_SECRET_KEY") or token_hex(32)
 rooms = {}
 rooms_lock = Lock()
 ROOM_CODES = tuple(f"ROOM{number:02d}" for number in range(1, 21))
-WINDOW_MONTHS = 36
-CITY_COUNT = 5
-ALLOW_FEWER_THAN_5 = False
-N_CANDIDATES_SHOWN = 10
-MONTHS = (
-    ("01", "January"),
-    ("02", "February"),
-    ("03", "March"),
-    ("04", "April"),
-    ("05", "May"),
-    ("06", "June"),
-    ("07", "July"),
-    ("08", "August"),
-    ("09", "September"),
-    ("10", "October"),
-    ("11", "November"),
-    ("12", "December"),
-)
-COUNTRIES = tuple(sorted("""Afghanistan
-Albania
-Algeria
-Andorra
-Angola
-Antigua and Barbuda
-Argentina
-Armenia
-Australia
-Austria
-Azerbaijan
-Bahamas
-Bahrain
-Bangladesh
-Barbados
-Belarus
-Belgium
-Belize
-Benin
-Bhutan
-Bolivia
-Bosnia and Herzegovina
-Botswana
-Brazil
-Brunei
-Bulgaria
-Burkina Faso
-Burundi
-Cabo Verde
-Cambodia
-Cameroon
-Canada
-Central African Republic
-Chad
-Chile
-China
-Colombia
-Comoros
-Congo
-Costa Rica
-Côte d'Ivoire
-Croatia
-Cuba
-Cyprus
-Czechia
-Democratic Republic of the Congo
-Denmark
-Djibouti
-Dominica
-Dominican Republic
-Ecuador
-Egypt
-El Salvador
-Equatorial Guinea
-Eritrea
-Estonia
-Eswatini
-Ethiopia
-Fiji
-Finland
-France
-Gabon
-Gambia
-Georgia
-Germany
-Ghana
-Greece
-Grenada
-Guatemala
-Guinea
-Guinea-Bissau
-Guyana
-Haiti
-Honduras
-Hungary
-Iceland
-India
-Indonesia
-Iran
-Iraq
-Ireland
-Israel
-Italy
-Jamaica
-Japan
-Jordan
-Kazakhstan
-Kenya
-Kiribati
-Kuwait
-Kyrgyzstan
-Laos
-Latvia
-Lebanon
-Lesotho
-Liberia
-Libya
-Liechtenstein
-Lithuania
-Luxembourg
-Madagascar
-Malawi
-Malaysia
-Maldives
-Mali
-Malta
-Marshall Islands
-Mauritania
-Mauritius
-Mexico
-Micronesia
-Moldova
-Monaco
-Mongolia
-Montenegro
-Morocco
-Mozambique
-Myanmar
-Namibia
-Nauru
-Nepal
-Netherlands
-New Zealand
-Nicaragua
-Niger
-Nigeria
-North Korea
-North Macedonia
-Norway
-Oman
-Pakistan
-Palau
-Palestine
-Panama
-Papua New Guinea
-Paraguay
-Peru
-Philippines
-Poland
-Portugal
-Qatar
-Romania
-Russia
-Rwanda
-Saint Kitts and Nevis
-Saint Lucia
-Saint Vincent and the Grenadines
-Samoa
-San Marino
-Sao Tome and Principe
-Saudi Arabia
-Senegal
-Serbia
-Seychelles
-Sierra Leone
-Singapore
-Slovakia
-Slovenia
-Solomon Islands
-Somalia
-South Africa
-South Korea
-South Sudan
-Spain
-Sri Lanka
-Sudan
-Suriname
-Sweden
-Switzerland
-Syria
-Tajikistan
-Tanzania
-Thailand
-Timor-Leste
-Togo
-Tonga
-Trinidad and Tobago
-Tunisia
-Türkiye
-Turkmenistan
-Tuvalu
-Uganda
-Ukraine
-United Arab Emirates
-United Kingdom
-United States
-Uruguay
-Uzbekistan
-Vanuatu
-Vatican City
-Venezuela
-Vietnam
-Yemen
-Zambia
-Zimbabwe
-Åland Islands
-American Samoa
-Anguilla
-Antarctica
-Aruba
-Bermuda
-Bonaire, Sint Eustatius and Saba
-British Indian Ocean Territory
-British Virgin Islands
-Cayman Islands
-Christmas Island
-Cocos (Keeling) Islands
-Cook Islands
-Curaçao
-Falkland Islands
-Faroe Islands
-French Guiana
-French Polynesia
-French Southern Territories
-Gibraltar
-Greenland
-Guadeloupe
-Guam
-Guernsey
-Hong Kong
-Isle of Man
-Jersey
-Kosovo
-Macao
-Martinique
-Mayotte
-Montserrat
-New Caledonia
-Niue
-Norfolk Island
-Northern Mariana Islands
-Puerto Rico
-Réunion
-Saint Barthélemy
-Saint Helena, Ascension and Tristan da Cunha
-Saint Martin (French part)
-Saint Pierre and Miquelon
-Sint Maarten (Dutch part)
-South Georgia and the South Sandwich Islands
-Svalbard and Jan Mayen
-Taiwan
-Tokelau
-Turks and Caicos Islands
-United States Minor Outlying Islands
-United States Virgin Islands
-Wallis and Futuna
-Western Sahara""".splitlines(), key=str.casefold))
-
-
-def _window_months(today=None): # Calculate the start month, current month, and window label for the travel screening period
-    today = today or date.today()
-    current_month = today.year * 12 + today.month - 1  # Convert the current date to a month index for comparison
-    start_month = current_month - WINDOW_MONTHS # Calculate the start month index based on the defined window of months
-    start_year, start_month_index = divmod(start_month, 12)  # Convert the start month index to year and month components
-    start_month = f"{start_year:04d}-{start_month_index + 1:02d}"  # Format the start month as YYYY-MM
-    current_month = f"{today.year:04d}-{today.month:02d}"  # Format the current month as YYYY-MM
-    window_label = date(start_year, start_month_index + 1, 1).strftime("%B %Y")  # Create a human-readable label for the window
-    return start_month, current_month, window_label
-
-
-def _visit_month_options(start_month, current_month): # Generate a list of visit month options for a dropdown, grouped by year, within the allowed window
-    start_index = int(start_month[:4]) * 12 + int(start_month[5:]) - 1  # Convert the start month to a month index for comparison
-    current_index = int(current_month[:4]) * 12 + int(current_month[5:]) - 1  # Convert the current month to a month index for comparison
-    options_by_year = []  # Initialize a list to hold the visit month options grouped by year
-
-    for year in range(int(current_month[:4]), int(start_month[:4]) - 1, -1):  # Iterate over each year from current to start
-        year_options = []  # Initialize a list to hold the month options for the current year
-        for month_number, month_name in reversed(MONTHS):  # Iterate over months in reverse order (December to January)
-            option_index = year * 12 + int(month_number) - 1  # Calculate the month index for comparison
-            if start_index <= option_index <= current_index:  # Include only months within the allowed window
-                year_options.append((f"{year:04d}-{month_number}", month_name))  # Add the month option as a tuple of (YYYY-MM, month name)
-        if year_options:  # If there are any valid month options for the year, add them to the grouped options
-            options_by_year.append((year, year_options))  # Append the year and its corresponding month options to the list of grouped options
-
-    return options_by_year
+SCREENING_VERSION = "english-cities-v1"
 
 
 def consent_required(view):
@@ -324,6 +30,13 @@ def consent_required(view):
     return wrapped
 
 
+def _screening_complete():
+    return (
+        session.get("travel_intro_seen") is True
+        and session.get("travel_screening_complete") == SCREENING_VERSION
+    )
+
+
 def screening_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
@@ -331,91 +44,13 @@ def screening_required(view):
             if request.path.startswith("/api/"):
                 return jsonify(error="This study is not available after the travel screening."), 403
             return redirect(url_for("screened_out_cities"))
-        if session.get("travel_screening_complete") is not True:
+        if not _screening_complete():
             if request.path.startswith("/api/"):
                 return jsonify(error="Please complete the travel questions before continuing."), 403
             return redirect(url_for("travel_intro"))
-        if session.get("other_cities_complete") is not True:
-            if request.path.startswith("/api/"):
-                return jsonify(error="Please complete the other-city questions before continuing."), 403
-            return redirect(url_for("other_cities"))
         return view(*args, **kwargs)
 
     return wrapped
-
-
-def _city_key(city, country):
-    return f"{' '.join(city.split()).casefold()}|{' '.join(country.split()).casefold()}"
-
-
-def _select_other_cities(answers): # Select a set of other cities that the user has not visited based on the provided travel answers
-    visited = {_city_key(answer["city"], answer["country"]) for answer in answers}  # Create a set of city keys for cities that the user has already visited
-    eligible = [
-        city_id for city_id, city, country in CANDIDATE_CITIES  # Iterate over candidate cities and select those not already visited
-        if _city_key(city, country) not in visited
-    ]
-    return SystemRandom().sample(eligible, N_CANDIDATES_SHOWN)  # Randomly select a subset of eligible cities to show as other cities
-
-
-def _travel_answers(form):  # Extract travel answers from the submitted form data
-    answers = []
-    for index in range(1, CITY_COUNT + 1): # Iterate over each city index to extract the corresponding travel answers from the form
-        visit_year = form.get(f"visit_year_{index}", "")  # Extract the visit year for the current city
-        visit_month_number = form.get(f"visit_month_number_{index}", "")  # Extract the visit month number for the current city
-        answers.append({
-            "city": form.get(f"city_{index}", "").strip(),
-            "country": form.get(f"country_{index}", ""),
-            "visit_year": visit_year,
-            "visit_month_number": visit_month_number,
-            "visit_month": f"{visit_year}-{visit_month_number}" if visit_year and visit_month_number else "",
-            "duration": form.get(f"duration_{index}", ""),
-            "reason": form.get(f"reason_{index}", ""),
-            "companions": form.get(f"companions_{index}", ""),
-            "familiarity": form.get(f"familiarity_{index}", ""),
-        })  # Append the extracted travel answer for the current city to the answers list
-    return answers
-
-
-def _validate_travel_answers(answers, start_month, current_month):  # Validate the extracted travel answers against the allowed window and other rules
-    errors = {}  # Initialize an empty dictionary to store validation errors for each travel answer field
-    seen_cities = {}  # Keep track of cities that have already been entered to detect duplicates
-    allowed_choices = {  # Define the allowed choices for each travel answer field
-        "duration": {"1_day_or_less", "2_3_days", "4_7_days", "more_than_a_week"},
-        "reason": {"holiday", "work_or_study", "visiting_family_or_friends", "other"},
-        "companions": {"alone", "partner", "family", "friends", "colleagues", "other"},
-        "familiarity": {str(value) for value in range(1, 8)},
-    }
-
-    for index, answer in enumerate(answers, start=1):  # Iterate over each travel answer and validate its fields
-        for field in ("city", "country", "visit_month", "duration", "reason", "companions", "familiarity"):
-            if not answer[field]:
-                errors[f"{field}_{index}"] = "Please complete this field."
-
-        if len(answer["city"]) > 100:
-            errors[f"city_{index}"] = "City names must be 100 characters or fewer."
-
-        if answer["country"] and answer["country"] not in COUNTRIES:
-            errors[f"country_{index}"] = "Please choose a country from the list."
-
-        if answer["visit_month"]:
-            if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", answer["visit_month"]):
-                errors[f"visit_month_{index}"] = "Choose a valid month and year."
-            elif not start_month <= answer["visit_month"] <= current_month:
-                errors[f"visit_month_{index}"] = "Choose a visit within the date window shown above."
-
-        for field, choices in allowed_choices.items():
-            if answer[field] and answer[field] not in choices:
-                errors[f"{field}_{index}"] = "Choose one of the listed options."
-
-        if answer["city"] and answer["country"] in COUNTRIES:
-            key = _city_key(answer["city"], answer["country"])
-            if key in seen_cities:
-                errors[f"city_{index}"] = "Each entry must be a different city and country."
-                errors[f"city_{seen_cities[key]}"] = "Each entry must be a different city and country."
-            else:
-                seen_cities[key] = index
-
-    return errors # Return the dictionary of validation errors for the travel answers
 
 
 def _get_participant_id(data):
@@ -462,29 +97,25 @@ def start_study():
 
 @app.post("/consent") # Handle consent decision (accept or deny)
 def consent_decision():
-    decision = request.form.get("decision") # Get the user's consent decision from the form; request.form contains the submitted form data from current request; get retrieves the value for the given key, or None if the key is not present
-    if decision in ("accept", "deny"): # If the decision is either "accept" or "deny", clear session data related to other cities
-        # This ensures that any previous travel city selections and related session data are removed when the user makes a new consent decision; means a new flow was started
-        session.pop("other_city_ids", None)
-        session.pop("other_cities_complete", None)
-        session.pop("travel_intro_seen", None)
-        session.pop("travel_screening_complete", None)
-        session.pop("travel_screened_out", None)
+    decision = request.form.get("decision")
+    if decision not in ("accept", "deny"):
+        return "Invalid consent choice.", 400
+    # Drop legacy city selections; current progress and screen-out survive return visits.
+    session.pop("other_city_ids", None)
+    session.pop("other_cities_complete", None)
     if decision == "accept":
         session["consent_accepted"] = True
         return redirect(url_for("travel_intro"))
-    if decision == "deny":
-        session.pop("consent_accepted", None)
-        return render_template("no_consent.html")
-    return "Invalid consent choice.", 400
+    session.pop("consent_accepted", None)
+    return render_template("no_consent.html")
 
 
 @app.get("/travel-intro")
-@consent_required # Ensure the user has given consent before accessing the travel intro page
-def travel_intro(): # Display the travel introduction page if the user has not been screened out or completed travel screening
+@consent_required
+def travel_intro():
     if session.get("travel_screened_out") is True:
         return redirect(url_for("screened_out_cities"))
-    if session.get("travel_screening_complete") is True:
+    if _screening_complete():
         return redirect(url_for("room"))
     return render_template("travel_intro.html")
 
@@ -492,69 +123,46 @@ def travel_intro(): # Display the travel introduction page if the user has not b
 @app.post("/travel-intro")
 @consent_required
 def begin_travel_screening():
+    if session.get("travel_screened_out") is True:
+        return redirect(url_for("screened_out_cities"))
+    if _screening_complete():
+        return redirect(url_for("room"))
     session["travel_intro_seen"] = True
     return redirect(url_for("travel_cities"))
 
 
-@app.route("/travel-cities", methods=["GET", "POST"]) # Handle travel cities page for both GET and POST requests
+@app.route("/travel-cities", methods=["GET", "POST"])
 @consent_required
 def travel_cities():
     if session.get("travel_screened_out") is True:
         return redirect(url_for("screened_out_cities"))
     if session.get("travel_intro_seen") is not True:
         return redirect(url_for("travel_intro"))
-    if session.get("travel_screening_complete") is True:
+    if _screening_complete():
         return redirect(url_for("room"))
 
-    start_month, current_month, window_label = _window_months() # Get the start month, current month, and window label for travel screening
+    values = {}
+    errors = {}
     if request.method == "POST":
-        answers = _travel_answers(request.form)  # Extract travel answers from the submitted form data
-        errors = _validate_travel_answers(answers, start_month, current_month)  # Validate the extracted travel answers against the allowed window
-        if errors: # If there are validation errors, re-render the travel cities page with the errors and previously entered answers
-            return render_template(
-                "travel_cities.html",
-                answers=answers,
-                errors=errors,
-                start_month=start_month,
-                current_month=current_month,
-                window_label=window_label,
-                countries=COUNTRIES,
-                months=MONTHS,
-                visit_month_options=_visit_month_options(start_month, current_month),
-            ), 400
+        for city_id, _, _ in CANDIDATE_CITIES:
+            for field, allowed in (("visited", {"yes", "no"}), ("familiarity", {str(n) for n in range(1, 8)})):
+                key = f"{field}_{city_id}"
+                values[key] = request.form.get(key, "")
+                if len(request.form.getlist(key)) != 1 or values[key] not in allowed:
+                    errors[key] = "Please choose Yes or No." if field == "visited" else "Please choose a rating from 1 to 7."
+        # Validate all 40 fields before making any eligibility decision.
+        if not errors:
+            yes_count = sum(values[f"visited_{city_id}"] == "yes" for city_id, _, _ in CANDIDATE_CITIES)
+            session.pop("other_city_ids", None)
+            session.pop("other_cities_complete", None)
+            if yes_count >= 5 and len(CANDIDATE_CITIES) - yes_count >= 5:
+                session["travel_screening_complete"] = SCREENING_VERSION
+                return redirect(url_for("room"))
+            session.pop("travel_screening_complete", None)
+            session["travel_screened_out"] = True
+            return redirect(url_for("screened_out_cities"))
 
-        session["other_city_ids"] = _select_other_cities(answers)  # Store the selected other cities in the session
-        session.pop("other_cities_complete", None)  # Clear any previous completion status for other cities
-        session["travel_screening_complete"] = True  # Mark the travel screening as complete
-        return redirect(url_for("other_cities"))  # Redirect to the other cities page after completing travel screening
-
-    answers = _travel_answers({})
-    return render_template(
-        "travel_cities.html",
-        answers=answers,
-        errors={},
-        start_month=start_month,
-        current_month=current_month,
-        window_label=window_label,
-        countries=COUNTRIES,
-        months=MONTHS,
-        visit_month_options=_visit_month_options(start_month, current_month),
-    )
-
-
-@app.post("/travel-cities/unable")
-@consent_required
-def unable_to_name_cities():
-    if session.get("travel_screening_complete") is True:
-        return redirect(url_for("room"))
-    if session.get("travel_intro_seen") is not True:
-        return redirect(url_for("travel_intro"))
-    if ALLOW_FEWER_THAN_5:
-        session["other_city_ids"] = _select_other_cities([])
-        session["travel_screening_complete"] = True
-        return redirect(url_for("other_cities"))
-    session["travel_screened_out"] = True
-    return render_template("screened_out.html")
+    return render_template("travel_cities.html", cities=CANDIDATE_CITIES, values=values, errors=errors), 400 if errors else 200
 
 
 @app.get("/screened-out-cities")
@@ -563,40 +171,6 @@ def screened_out_cities():
     if session.get("travel_screened_out") is not True:
         return redirect(url_for("travel_intro"))
     return render_template("screened_out.html")
-
-
-@app.route("/other-cities", methods=["GET", "POST"]) # Handles the form for other cities visited by the participant
-@consent_required
-def other_cities():
-    if session.get("travel_screened_out") is True:
-        return redirect(url_for("screened_out_cities"))
-    if session.get("travel_screening_complete") is not True:
-        return redirect(url_for("travel_intro"))
-    if session.get("other_cities_complete") is True:
-        return redirect(url_for("room"))
-
-    city_lookup = {city_id: (city, country) for city_id, city, country in CANDIDATE_CITIES} # Maps city IDs to their corresponding city and country for quick lookup
-    selected_ids = session.get("other_city_ids", []) # Retrieves the list of other city IDs selected by the participant from the session
-    if len(selected_ids) != N_CANDIDATES_SHOWN or any(city_id not in city_lookup for city_id in selected_ids):
-        # A session from before this step was introduced must repeat the visited-city form.
-        session.pop("travel_screening_complete", None) # Clears the travel screening completion flag to force the participant to redo the form
-        return redirect(url_for("travel_cities"))
-
-    cities = [(city_id, *city_lookup[city_id]) for city_id in selected_ids] # Prepares the list of cities with their IDs, names, and countries for rendering the form
-    values = {} # Stores the form values submitted by the participant
-    errors = {} # Stores validation errors for the form fields  
-    if request.method == "POST": # Handles the form submission for other cities
-        for city_id in selected_ids:
-            for field, allowed in (("visited", {"yes", "no"}), ("familiarity", {str(n) for n in range(1, 8)})):
-                key = f"{field}_{city_id}"
-                values[key] = request.form.get(key, "")
-                if values[key] not in allowed:
-                    errors[key] = "Please choose Yes or No." if field == "visited" else "Please choose a rating from 1 to 7." # Sets the appropriate error message based on the field type
-        if not errors:
-            session["other_cities_complete"] = True
-            return redirect(url_for("room"))
-
-    return render_template("other_cities.html", cities=cities, values=values, errors=errors), 400 if errors else 200
 
 
 @app.post("/api/rooms")

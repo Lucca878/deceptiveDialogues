@@ -18,8 +18,8 @@ class RoomMatchingTests(unittest.TestCase):
         client = server.app.test_client()
         with client.session_transaction() as browser_session:
             browser_session["consent_accepted"] = True
-            browser_session["travel_screening_complete"] = True
-            browser_session["other_cities_complete"] = True
+            browser_session["travel_intro_seen"] = True
+            browser_session["travel_screening_complete"] = server.SCREENING_VERSION
         return client
 
     def match(self, participant_id):
@@ -45,21 +45,21 @@ class RoomMatchingTests(unittest.TestCase):
         self.assertEqual(self.match("first").get_json(), paired)
         self.assertEqual(len(server.rooms), 1)
 
-    def test_capacity_is_twenty_people_with_no_recycling(self):
-        for index in range(20):
+    def test_configured_capacity_with_no_recycling(self):
+        for index in range(2 * len(server.ROOM_CODES)):
             self.assertEqual(self.match(f"person-{index}").status_code, 200)
         overflow = self.match("overflow")
         self.assertEqual(overflow.status_code, 409)
         self.assertEqual(overflow.get_json()["error"], "All rooms are currently occupied.")
-        self.assertEqual(len(server.rooms), 10)
+        self.assertEqual(len(server.rooms), len(server.ROOM_CODES))
         self.assertEqual(self.match("person-0").status_code, 200)
 
     def test_concurrent_arrivals_never_overfill_or_duplicate_memberships(self):
-        ids = [f"person-{index}" for index in range(20)]
+        ids = [f"person-{index}" for index in range(2 * len(server.ROOM_CODES))]
         with ThreadPoolExecutor(max_workers=8) as executor:
             responses = list(executor.map(self.match, ids + ids))
         self.assertTrue(all(response.status_code == 200 for response in responses))
-        self.assertEqual(len(server.rooms), 10)
+        self.assertEqual(len(server.rooms), len(server.ROOM_CODES))
         memberships = []
         for room in server.rooms.values():
             self.assertEqual(len(room["participants"]), 2)

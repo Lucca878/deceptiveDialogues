@@ -24,9 +24,11 @@ npm run dev          # build TypeScript and start the Flask development server
 
 The Conda environment pins Python to 3.12 and installs Flask. Open <http://localhost:8000/> after the server starts. Stop it with `Ctrl+C`.
 
-The study flow is landing → consent → travel introduction → five-city questionnaire → Other cities → automatic matching at `/room` → chat at `/dialogue`. The first questionnaire checks five distinct city/country pairs and visit months within the rolling 36-month window. The server then selects 10 cities at random from the provisional 40-city pool in `city_candidates.py`, excluding matching city/country pairs. Selection and order stay the same on refresh and validation errors. The Other cities form requires Yes/No visitation and 1–7 familiarity answers for every candidate before room access. Answers are validated but discarded; only selected candidate IDs and temporary session flags are kept in the signed browser session. Matching ignores case and repeated whitespace, but does not recognize alternative city names or spellings. Participants who cannot provide five cities are screened out.
+The study flow is landing → consent → travel introduction → one questionnaire at `/travel-cities` → automatic matching at `/room` → chat at `/dialogue`. England eligibility is handled by Prolific only; the app asks no location question. The questionnaire shows all 20 preset English cities in the fixed order defined in [city_candidates.py](city_candidates.py), with stable slug IDs and England as their country. For every city, participants must answer Yes/No to visiting in the past 3 years and rate familiarity from 1 to 7. The server validates all 40 fields before checking eligibility: at least five Yes and at least five No answers are required (5–15 Yes inclusive). Familiarity does not affect eligibility. Invalid or missing answers return HTTP 400 with valid selections preserved, not a screen-out. The form needs no JavaScript.
 
-On entering `/room`, participants are automatically paired in arrival order using ten fixed internal codes (`ROOM01`–`ROOM10`). No code entry or sharing is needed. The first arrival waits; the next joins the same room and the server randomly assigns interviewer/interviewee roles. Returning requests with the same participant ID reuse the existing assignment. Once paired, both browsers enter the dialogue. At 20 participants, new arrivals see an all-rooms-occupied message. Rooms are not recycled, and abandoned waiting participants are not removed automatically yet. Restarting the server clears every room, assignment, and chat message. For local pair testing, use two separate browser contexts with distinct participant IDs and complete both questionnaires in each.
+Questionnaire answers are validated then discarded; only consent, introduction progress, and eligibility/completion flags remain in the signed browser session. The versioned completion marker prevents old screening completions from opening the room. Consent and the introduction are prerequisites; room, dialogue, and every room API enforce screening server-side. Screen-out remains in force on return visits in the same session, including through Start or renewed consent. Clearing cookies or changing browser sessions can reset this prototype state; Prolific identity is not yet authenticated by the app.
+
+On entering `/room`, participants are automatically paired in arrival order using 20 fixed internal codes (`ROOM01`–`ROOM20`), with capacity for 40 participants. No code entry or sharing is needed. The first arrival waits; the next joins the same room and the server randomly assigns interviewer/interviewee roles. Returning requests with the same participant ID reuse the existing assignment. Once paired, both browsers enter the dialogue. At full capacity, new arrivals see an all-rooms-occupied message. Rooms are not recycled, and abandoned waiting participants are not removed automatically yet. Restarting the server clears every room, assignment, and chat message. For local pair testing, use two separate browser contexts with distinct participant IDs and complete the questionnaire in each.
 
 ## Project structure
 
@@ -38,7 +40,6 @@ deceptiveDialogues/
 │   │   ├── consent.html
 │   │   ├── travel_intro.html
 │   │   ├── travel_cities.html
-│   │   ├── other_cities.html
 │   │   ├── screened_out.html
 │   │   ├── room.html
 │   │   └── dialogue.html
@@ -49,10 +50,9 @@ deceptiveDialogues/
 │   └── src/                # TypeScript source
 │       ├── landing.ts
 │       ├── room.ts
-│       ├── dialogue.ts
-│       └── travel.ts
+│       └── dialogue.ts
 ├── server.py               # Flask routes
-├── city_candidates.py      # provisional pool with stable city IDs
+├── city_candidates.py      # fixed 20-city questionnaire order and stable IDs
 ├── environment.yml         # Conda Python and Flask dependencies
 ├── package.json            # npm scripts and build tools
 ├── tsconfig.json           # TypeScript type-checking settings
@@ -76,6 +76,11 @@ Flask renders files in `app/templates/`; those templates are not exposed as raw 
 after changing TypeScript while the server is running.
 
 Run `npm run typecheck` before every commit.
+
+Run the backend tests from the project root with the Conda environment active:
+`python -m unittest discover -s tests -v`. The suite covers questionnaire validation,
+eligibility boundaries, access gates, full room capacity, concurrent matching, and
+private server-generated message timestamps.
 
 ## Tech stack
 

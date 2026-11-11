@@ -1,207 +1,248 @@
-from datetime import date
+from html.parser import HTMLParser
 import unittest
 
+from werkzeug.datastructures import MultiDict
+
 import server
+
+
+EXPECTED_CITIES = (
+    ("liverpool", "Liverpool", "England"),
+    ("bristol", "Bristol", "England"),
+    ("leicester", "Leicester", "England"),
+    ("coventry", "Coventry", "England"),
+    ("wakefield", "Wakefield", "England"),
+    ("nottingham", "Nottingham", "England"),
+    ("newcastle-upon-tyne", "Newcastle upon Tyne", "England"),
+    ("doncaster", "Doncaster", "England"),
+    ("milton-keynes", "Milton Keynes", "England"),
+    ("salford", "Salford", "England"),
+    ("sunderland", "Sunderland", "England"),
+    ("brighton-and-hove", "Brighton and Hove", "England"),
+    ("wolverhampton", "Wolverhampton", "England"),
+    ("kingston-upon-hull", "Kingston upon Hull", "England"),
+    ("plymouth", "Plymouth", "England"),
+    ("derby", "Derby", "England"),
+    ("stoke-on-trent", "Stoke-on-Trent", "England"),
+    ("southampton", "Southampton", "England"),
+    ("peterborough", "Peterborough", "England"),
+    ("westminster", "Westminster", "England"),
+)
+
+
+class FormParser(HTMLParser):
+    def __init__(self, response):
+        super().__init__()
+        self.inputs = []
+        self.headings = []
+        self.scripts = []
+        self.feed(response.get_data(as_text=True))
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "input":
+            self.inputs.append(attrs)
+        if tag == "h2":
+            self.headings.append(attrs.get("id"))
+        if tag == "script":
+            self.scripts.append(attrs)
 
 
 class TravelScreeningTests(unittest.TestCase):
     def setUp(self):
         self.client = server.app.test_client()
+        with server.rooms_lock:
+            server.rooms.clear()
+
+    def tearDown(self):
+        with server.rooms_lock:
+            server.rooms.clear()
+
+    def assert_redirect(self, response, path):
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], path)
 
     def accept_consent(self):
-        response = self.client.post("/consent", data={"decision": "accept"})
-        self.assertEqual(response.status_code, 302)
-        self.assertTrue(response.headers["Location"].endswith("/travel-intro"))
+        self.assert_redirect(self.client.post("/consent", data={"decision": "accept"}), "/travel-intro")
 
     def begin_screening(self):
         self.accept_consent()
-        response = self.client.post("/travel-intro")
-        self.assertEqual(response.status_code, 302)
-        self.assertTrue(response.headers["Location"].endswith("/travel-cities"))
+        self.assert_redirect(self.client.post("/travel-intro"), "/travel-cities")
 
-    def valid_answers(self):
-        start_month, _, _ = server._window_months()
-        year, month = start_month.split("-")
-        answers = {}
-        for index in range(1, server.CITY_COUNT + 1):
-            answers.update(
-                {
-                    f"city_{index}": f"City {index}",
-                    f"country_{index}": "Netherlands",
-                    f"visit_year_{index}": year,
-                    f"visit_month_number_{index}": month,
-                    f"duration_{index}": "2_3_days",
-                    f"reason_{index}": "holiday",
-                    f"companions_{index}": "friends",
-                    f"familiarity_{index}": "4",
-                }
-            )
-        return answers
-
-    def test_window_is_36_months_and_month_based(self):
-        self.assertEqual(
-            server._window_months(date(2026, 10, 29)),
-            ("2023-10", "2026-10", "October 2023"),
-        )
-
-    def test_room_and_api_require_completed_screening(self):
-        self.accept_consent()
-        self.assertTrue(self.client.get("/room").headers["Location"].endswith("/travel-intro"))
-        self.assertEqual(
-            self.client.post("/api/rooms", json={"participant_id": "participant-1"}).status_code,
-            403,
-        )
-
-    def test_intro_must_be_seen_before_questionnaire(self):
-        self.accept_consent()
-        response = self.client.get("/travel-cities")
-        self.assertTrue(response.headers["Location"].endswith("/travel-intro"))
-
-    def test_visit_date_chooses_year_then_month(self):
-        self.begin_screening()
-        response = self.client.get("/travel-cities")
-        self.assertIn(b'name="visit_year_1"', response.data)
-        self.assertIn(b'name="visit_month_number_1"', response.data)
-        self.assertIn(b">Year<", response.data)
-        self.assertIn(b">Month<", response.data)
-
-    def test_valid_answers_continue_without_retaining_responses(self):
-        self.begin_screening()
-        response = self.client.post("/travel-cities", data=self.valid_answers())
-        self.assertEqual(response.status_code, 302)
-        self.assertTrue(response.headers["Location"].endswith("/other-cities"))
-        self.assertEqual(self.client.get("/room").status_code, 302)
-        with self.client.session_transaction() as browser_session:
-            self.assertTrue(browser_session["travel_screening_complete"])
-            self.assertNotIn("City 1", repr(dict(browser_session)))
-
-    def test_candidate_pool_and_exclusion(self):
-        self.assertEqual(len(server.CANDIDATE_CITIES), 40)
-        self.assertEqual(len({entry[0] for entry in server.CANDIDATE_CITIES}), 40)
-        self.assertTrue(all(country in server.COUNTRIES for _, _, country in server.CANDIDATE_CITIES))
-        answers = [{"city": f"  {city.upper()}  ", "country": country} for _, city, country in server.CANDIDATE_CITIES[:5]]
-        excluded = {entry[0] for entry in server.CANDIDATE_CITIES[:5]}
-        for _ in range(10):
-            selected = server._select_other_cities(answers)
-            self.assertEqual(len(set(selected)), 10)
-            self.assertTrue(excluded.isdisjoint(selected))
-
-    def prepare_other_cities(self):
-        self.begin_screening()
-        self.client.post("/travel-cities", data=self.valid_answers())
-        with self.client.session_transaction() as browser_session:
-            return list(browser_session["other_city_ids"])
-
-    def test_other_city_order_survives_refresh_and_invalid_post(self):
-        selected = self.prepare_other_cities()
-        first = self.client.get("/other-cities")
-        second = self.client.get("/other-cities")
-        self.assertEqual(first.data, second.data)
-        response = self.client.post("/other-cities", data={f"visited_{selected[0]}": "yes"})
-        self.assertEqual(response.status_code, 400)
-        self.assertIn(b"Please choose a rating", response.data)
-        with self.client.session_transaction() as browser_session:
-            self.assertEqual(browser_session["other_city_ids"], selected)
-        self.assertEqual(self.client.post("/api/rooms", json={"participant_id": "test"}).status_code, 403)
-
-    def test_other_cities_valid_answers_open_room_without_storing_ratings(self):
-        selected = self.prepare_other_cities()
+    def answers(self, yes_count=5, rating="4"):
         data = {}
-        for city_id in selected:
-            data[f"visited_{city_id}"] = "no"
-            data[f"familiarity_{city_id}"] = "4"
-        response = self.client.post("/other-cities", data=data)
-        self.assertTrue(response.headers["Location"].endswith("/room"))
-        self.assertEqual(self.client.get("/room").status_code, 200)
+        for index, (city_id, _, _) in enumerate(EXPECTED_CITIES):
+            data[f"visited_{city_id}"] = "yes" if index < yes_count else "no"
+            data[f"familiarity_{city_id}"] = rating
+        return data
+
+    def assert_all_gates_blocked(self, destination):
+        for path in ("/room", "/dialogue"):
+            self.assert_redirect(self.client.get(path), destination)
+        for method, path in (
+            ("POST", "/api/rooms"),
+            ("GET", "/api/rooms/ROOM01?participant_id=test"),
+            ("POST", "/api/rooms/ROOM01/messages"),
+            ("GET", "/api/rooms/ROOM01/messages?participant_id=test"),
+            ("POST", "/api/rooms/ROOM01/typing"),
+        ):
+            with self.subTest(method=method, path=path):
+                response = self.client.open(path, method=method, json={"participant_id": "test", "text": "Hello"})
+                self.assertEqual(response.status_code, 403)
+                self.assertIn("error", response.get_json())
+        self.assertEqual(server.rooms, {})
+
+    def test_exact_city_ids_names_order_and_complete_rendered_form(self):
+        self.assertEqual(server.CANDIDATE_CITIES, EXPECTED_CITIES)
+        self.begin_screening()
+        response = self.client.get("/travel-cities")
+        self.assertEqual(response.status_code, 200)
+        form = FormParser(response)
+        self.assertEqual(form.headings, [f"candidate-{city_id}" for city_id, _, _ in EXPECTED_CITIES])
+        self.assertEqual(len(form.inputs), 180)
+        self.assertEqual(len({entry["id"] for entry in form.inputs}), 180)
+        self.assertEqual({entry["name"] for entry in form.inputs}, set(self.answers()))
+        self.assertTrue(all(entry["type"] == "radio" and "required" in entry for entry in form.inputs))
+        self.assertFalse(any("checked" in entry for entry in form.inputs))
+        self.assertEqual(form.scripts, [])
+        for city_id, name, country in EXPECTED_CITIES:
+            self.assertIn(f">{name}, {country}</h2>", response.get_data(as_text=True))
+            for field, options in (("visited", ["yes", "no"]), ("familiarity", list("1234567"))):
+                self.assertEqual([entry["value"] for entry in form.inputs if entry["name"] == f"{field}_{city_id}"], options)
+        self.assertIn(b"past 3 years", response.data)
+
+    def test_get_refresh_is_stable_and_stores_no_city_selection(self):
+        self.begin_screening()
+        self.assertEqual(self.client.get("/travel-cities").data, self.client.get("/travel-cities").data)
         with self.client.session_transaction() as browser_session:
-            self.assertTrue(browser_session["other_cities_complete"])
-            self.assertFalse(any(key.startswith(("visited_", "familiarity_")) for key in browser_session))
+            self.assertEqual(dict(browser_session), {"consent_accepted": True, "travel_intro_seen": True})
 
-    def test_other_cities_cannot_be_skipped_or_given_invalid_choices(self):
-        self.assertTrue(self.client.get("/other-cities").headers["Location"].endswith("/consent"))
-        selected = self.prepare_other_cities()
-        data = {f"visited_{city_id}": "yes" for city_id in selected}
-        data.update({f"familiarity_{city_id}": "8" for city_id in selected})
-        self.assertEqual(self.client.post("/other-cities", data=data).status_code, 400)
-        response = self.client.get("/start")
-        self.assertTrue(response.headers["Location"].endswith("/consent"))
-        with self.client.session_transaction() as browser_session:
-            self.assertEqual(browser_session["other_city_ids"], selected)
-            self.assertTrue(browser_session["travel_screening_complete"])
-            self.assertNotIn("other_cities_complete", browser_session)
+    def test_consent_and_intro_are_required_for_get_post_and_all_gates(self):
+        for method, path in (("GET", "/travel-intro"), ("POST", "/travel-intro"), ("GET", "/travel-cities"), ("POST", "/travel-cities")):
+            self.assert_redirect(self.client.open(path, method=method, data=self.answers()), "/consent")
+        self.assert_all_gates_blocked("/consent")
+        self.accept_consent()
+        for method in ("GET", "POST"):
+            self.assert_redirect(self.client.open("/travel-cities", method=method, data=self.answers()), "/travel-intro")
+        self.assert_all_gates_blocked("/travel-intro")
+        self.assertEqual(self.client.get("/travel-intro").status_code, 200)
+        self.assert_redirect(self.client.get("/travel-cities"), "/travel-intro")
 
-    def test_duplicate_cities_are_rejected_after_normalization(self):
+    def test_yes_count_boundaries_and_no_persisted_answers(self):
+        for yes_count in (0, 4, 5, 15, 16, 20):
+            with self.subTest(yes_count=yes_count):
+                self.client = server.app.test_client()
+                self.begin_screening()
+                eligible = 5 <= yes_count <= 15
+                response = self.client.post("/travel-cities", data=self.answers(yes_count))
+                self.assert_redirect(response, "/room" if eligible else "/screened-out-cities")
+                with self.client.session_transaction() as browser_session:
+                    expected = {"consent_accepted": True, "travel_intro_seen": True}
+                    expected.update({"travel_screening_complete": server.SCREENING_VERSION} if eligible else {"travel_screened_out": True})
+                    self.assertEqual(dict(browser_session), expected)
+                if eligible:
+                    self.assertEqual(self.client.get("/room").status_code, 200)
+                    self.assertEqual(self.client.get("/dialogue").status_code, 200)
+                else:
+                    self.assert_all_gates_blocked("/screened-out-cities")
+
+    def test_every_familiarity_rating_is_valid_and_does_not_change_eligibility(self):
+        for rating in map(str, range(1, 8)):
+            for yes_count in (4, 5, 15, 16):
+                with self.subTest(rating=rating, yes_count=yes_count):
+                    self.client = server.app.test_client()
+                    self.begin_screening()
+                    self.assert_redirect(self.client.post("/travel-cities", data=self.answers(yes_count, rating)), "/room" if 5 <= yes_count <= 15 else "/screened-out-cities")
+
+    def test_invalid_or_missing_fields_return_400_preserve_selections_and_do_not_screen_out(self):
+        for field in ("visited", "familiarity"):
+            for invalid in (None, "", "8", "invalid"):
+                for yes_count in (0, 5, 20):
+                    with self.subTest(field=field, invalid=invalid, yes_count=yes_count):
+                        self.client = server.app.test_client()
+                        self.begin_screening()
+                        data = self.answers(yes_count)
+                        key = f"{field}_westminster"
+                        if invalid is None:
+                            del data[key]
+                        else:
+                            data[key] = invalid
+                        response = self.client.post("/travel-cities", data=data)
+                        self.assertEqual(response.status_code, 400)
+                        checked = {entry["name"]: entry["value"] for entry in FormParser(response).inputs if "checked" in entry}
+                        self.assertEqual(checked, {name: value for name, value in data.items() if name != key})
+                        with self.client.session_transaction() as browser_session:
+                            self.assertEqual(dict(browser_session), {"consent_accepted": True, "travel_intro_seen": True})
+                        self.assert_all_gates_blocked("/travel-intro")
+                        self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/room")
+
+    def test_all_missing_fields_report_errors_before_eligibility(self):
         self.begin_screening()
-        answers = self.valid_answers()
-        answers["city_2"] = "  CITY   1  "
-        response = self.client.post("/travel-cities", data=answers)
+        response = self.client.post("/travel-cities", data={})
         self.assertEqual(response.status_code, 400)
-        self.assertIn(b"different city and country", response.data)
+        self.assertEqual(response.data.count(b"Please choose Yes or No."), 20)
+        self.assertEqual(response.data.count(b"Please choose a rating from 1 to 7."), 20)
+        self.assertEqual(self.client.get("/travel-cities").status_code, 200)
 
-    def test_same_city_name_in_different_countries_is_distinct(self):
+    def test_duplicate_field_values_are_rejected(self):
         self.begin_screening()
-        answers = self.valid_answers()
-        answers["city_2"] = answers["city_1"]
-        answers["country_2"] = "Canada"
-        self.assertEqual(self.client.post("/travel-cities", data=answers).status_code, 302)
+        for key in ("visited_liverpool", "familiarity_liverpool"):
+            data = MultiDict(self.answers())
+            data.add(key, data[key])
+            self.assertEqual(self.client.post("/travel-cities", data=data).status_code, 400)
 
-    def test_visit_outside_window_is_rejected(self):
+    def test_screen_out_survives_return_and_resubmission(self):
         self.begin_screening()
-        answers = self.valid_answers()
-        answers["visit_year_1"] = "2023"
-        answers["visit_month_number_1"] = "09"
-        response = self.client.post("/travel-cities", data=answers)
-        self.assertEqual(response.status_code, 400)
-        self.assertIn(b"within the date window", response.data)
-
-    def test_future_visit_is_rejected(self):
-        self.begin_screening()
-        answers = self.valid_answers()
-        _, current_month, _ = server._window_months()
-        year, month = map(int, current_month.split("-"))
-        next_month = date(year + (month == 12), month % 12 + 1, 1).strftime("%Y-%m")
-        answers["visit_year_1"], answers["visit_month_number_1"] = next_month.split("-")
-        response = self.client.post("/travel-cities", data=answers)
-        self.assertEqual(response.status_code, 400)
-        self.assertIn(b"within the date window", response.data)
-
-    def test_invalid_country_and_missing_field_are_rejected(self):
-        self.begin_screening()
-        answers = self.valid_answers()
-        answers["country_1"] = "Atlantis"
-        answers["reason_2"] = ""
-        response = self.client.post("/travel-cities", data=answers)
-        self.assertEqual(response.status_code, 400)
-        self.assertIn(b"choose a country from the list", response.data)
-        self.assertIn(b"Please complete this field", response.data)
-
-    def test_screen_out_blocks_room_and_apis(self):
-        self.begin_screening()
-        response = self.client.post("/travel-cities/unable")
+        self.client.post("/travel-cities", data=self.answers(16))
+        response = self.client.get("/screened-out-cities")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"you can't take part in this study", response.data)
-        self.assertEqual(self.client.get("/room").status_code, 302)
-        self.assertEqual(
-            self.client.post("/api/rooms", json={"participant_id": "participant-1"}).status_code,
-            403,
-        )
+        self.assert_redirect(self.client.get("/start"), "/consent")
+        self.assert_redirect(self.client.get("/consent"), "/travel-intro")
+        for decision in ("accept", "deny", "accept"):
+            self.client.post("/consent", data={"decision": decision})
+        for method, path in (("GET", "/travel-intro"), ("POST", "/travel-intro"), ("GET", "/travel-cities"), ("POST", "/travel-cities")):
+            self.assert_redirect(self.client.open(path, method=method, data=self.answers()), "/screened-out-cities")
+        self.assert_all_gates_blocked("/screened-out-cities")
 
-    def test_unable_route_requires_post(self):
-        self.begin_screening()
-        response = self.client.get("/travel-cities/unable")
-        self.assertEqual(response.status_code, 405)
-        with self.client.session_transaction() as browser_session:
-            self.assertNotIn("travel_screened_out", browser_session)
+    def test_old_completion_flags_cannot_bypass_new_screening(self):
+        for marker in (True, "old-version"):
+            with self.subTest(marker=marker):
+                self.client = server.app.test_client()
+                with self.client.session_transaction() as browser_session:
+                    browser_session.update(consent_accepted=True, travel_intro_seen=True, travel_screening_complete=marker, other_cities_complete=True, other_city_ids=["paris"])
+                self.assert_all_gates_blocked("/travel-intro")
+                self.assertEqual(self.client.get("/travel-intro").status_code, 200)
+                self.assertEqual(self.client.get("/travel-cities").status_code, 200)
+                self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/room")
+                with self.client.session_transaction() as browser_session:
+                    self.assertEqual(dict(browser_session), {"consent_accepted": True, "travel_intro_seen": True, "travel_screening_complete": server.SCREENING_VERSION})
 
-    def test_start_preserves_consent_and_screen_out_state(self):
-        self.begin_screening()
-        self.client.post("/travel-cities/unable")
-        response = self.client.get("/start")
-        self.assertTrue(response.headers["Location"].endswith("/consent"))
+    def test_current_completion_still_requires_intro_and_screen_out_takes_precedence(self):
+        self.accept_consent()
         with self.client.session_transaction() as browser_session:
-            self.assertTrue(browser_session["consent_accepted"])
-            self.assertTrue(browser_session["travel_screened_out"])
-        self.assertTrue(self.client.get("/room").headers["Location"].endswith("/screened-out-cities"))
+            browser_session["travel_screening_complete"] = server.SCREENING_VERSION
+        self.assert_all_gates_blocked("/travel-intro")
+        with self.client.session_transaction() as browser_session:
+            browser_session["travel_intro_seen"] = True
+            browser_session["travel_screened_out"] = True
+        self.assert_all_gates_blocked("/screened-out-cities")
+
+    def test_completed_participant_returns_to_room_without_resubmitting(self):
+        self.begin_screening()
+        self.client.post("/travel-cities", data=self.answers())
+        self.accept_consent()
+        for method, path in (("GET", "/travel-intro"), ("POST", "/travel-intro"), ("GET", "/travel-cities"), ("POST", "/travel-cities")):
+            self.assert_redirect(self.client.open(path, method=method, data=self.answers(0)), "/room")
+        self.assertEqual(self.client.post("/api/rooms", json={"participant_id": "test"}).status_code, 200)
+
+    def test_obsolete_routes_are_absent_and_screenout_page_is_gated(self):
+        for path in ("/other-cities", "/travel-cities/unable"):
+            for method in ("GET", "POST"):
+                self.assertEqual(self.client.open(path, method=method).status_code, 404)
+        self.assert_redirect(self.client.get("/screened-out-cities"), "/consent")
+        self.accept_consent()
+        self.assert_redirect(self.client.get("/screened-out-cities"), "/travel-intro")
 
 
 if __name__ == "__main__":
