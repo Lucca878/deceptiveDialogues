@@ -234,13 +234,19 @@ class TravelScreeningTests(unittest.TestCase):
         after = datetime.now(timezone.utc)
         submission_id, record = self.retained()
         self.assertRegex(submission_id, r"^[0-9a-f]{64}$")
-        self.assertEqual(set(record), {"version", "timestamp", "answers"})
+        self.assertEqual(set(record), {"version", "timestamp", "answers", "order"})
         self.assertEqual(record["version"], server.SCREENING_VERSION)
         timestamp = datetime.fromisoformat(record["timestamp"])
         self.assertEqual(timestamp.tzinfo, timezone.utc)
         self.assertLessEqual(before.replace(microsecond=0), timestamp)
         self.assertLessEqual(timestamp, after)
         self.assertEqual(list(record["answers"]), [city_id for city_id, _, _ in EXPECTED_CITIES])
+        self.assertEqual(len(record["order"]), 10)
+        self.assertEqual(len(set(record["order"])), 10)
+        yes_count = sum(record["answers"][city_id]["visited"] == "yes" for city_id in record["order"])
+        no_count = sum(record["answers"][city_id]["visited"] == "no" for city_id in record["order"])
+        self.assertEqual(yes_count, 5)
+        self.assertEqual(no_count, 5)
         self.assertEqual(record["answers"], {
             city_id: {"visited": answers[f"visited_{city_id}"], "familiarity": int(answers[f"familiarity_{city_id}"])}
             for city_id, _, _ in EXPECTED_CITIES
@@ -297,7 +303,13 @@ class TravelScreeningTests(unittest.TestCase):
         self.assertEqual(new_record["version"], server.SCREENING_VERSION)
         self.assertNotEqual(new_record["timestamp"], malicious["timestamp"])
         self.assertEqual(new_record["answers"]["westminster"], {"visited": "no", "familiarity": 7})
-        self.assertEqual(set(new_record), {"answers", "timestamp", "version"})
+        self.assertEqual(set(new_record), {"answers", "timestamp", "version", "order"})
+        self.assertEqual(len(new_record["order"]), 10)
+        self.assertEqual(len(set(new_record["order"])), 10)
+        yes_count = sum(new_record["answers"][city_id]["visited"] == "yes" for city_id in new_record["order"])
+        no_count = sum(new_record["answers"][city_id]["visited"] == "no" for city_id in new_record["order"])
+        self.assertEqual(yes_count, 5)
+        self.assertEqual(no_count, 5)
         # Clearing one browser's progress must not clear either private record.
         with self.client.session_transaction() as browser_session:
             browser_session.clear()

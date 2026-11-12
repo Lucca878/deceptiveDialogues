@@ -11,6 +11,7 @@ from time import monotonic
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from random import sample, shuffle
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
@@ -361,16 +362,30 @@ def travel_cities():
                     # Only server-generated IDs select records. Ignore extra form
                     # keys, including IDs, timestamps, versions and truth fields.
                     submission_id = token_hex(32)
+                    answers = {
+                        city_id: {
+                            "visited": values[f"visited_{city_id}"],
+                            "familiarity": int(values[f"familiarity_{city_id}"]),
+                        }
+                        for city_id, _, _ in CANDIDATE_CITIES
+                    }
+                    visited_city_ids = [
+                        city_id for city_id, answer in answers.items()
+                        if answer["visited"] == "yes"
+                    ]
+                    not_visited_city_ids = [
+                        city_id for city_id, answer in answers.items()
+                        if answer["visited"] == "no"
+                    ]
+                    sampled_visited = sample(visited_city_ids, 5)
+                    sampled_not_visited = sample(not_visited_city_ids, 5)
+                    combined_sampled = sampled_visited + sampled_not_visited
+                    shuffle(combined_sampled)
                     screening_submissions[submission_id] = {
                         "version": SCREENING_VERSION,
                         "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-                        "answers": {
-                            city_id: {
-                                "visited": values[f"visited_{city_id}"],
-                                "familiarity": int(values[f"familiarity_{city_id}"]),
-                            }
-                            for city_id, _, _ in CANDIDATE_CITIES
-                        },
+                        "answers": answers,
+                        "order": combined_sampled,
                     }
                     # Re-screening replaces only this owner's room reference;
                     # no participant's retained record is deleted or overwritten.
