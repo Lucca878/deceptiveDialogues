@@ -1,3 +1,5 @@
+from copy import deepcopy
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 import unittest
 from unittest.mock import patch
@@ -63,10 +65,12 @@ class TravelScreeningTests(unittest.TestCase):
         self.client = server.app.test_client()
         with server.rooms_lock:
             server.rooms.clear()
+            server.screening_submissions.clear()
 
     def tearDown(self):
         with server.rooms_lock:
             server.rooms.clear()
+            server.screening_submissions.clear()
 
     def assert_redirect(self, response, path):
         self.assertEqual(response.status_code, 302)
@@ -139,18 +143,24 @@ class TravelScreeningTests(unittest.TestCase):
         self.assertEqual(self.client.get("/travel-intro").status_code, 200)
         self.assert_redirect(self.client.get("/travel-cities"), "/travel-intro")
 
-    def test_yes_count_boundaries_and_no_persisted_answers(self):
+    def test_yes_count_boundaries_and_only_opaque_answer_reference_in_session(self):
         for yes_count in (0, 4, 5, 15, 16, 20):
             with self.subTest(yes_count=yes_count):
                 self.client = server.app.test_client()
                 self.begin_screening()
                 eligible = 5 <= yes_count <= 15
+                with server.rooms_lock:
+                    before_count = len(server.screening_submissions)
                 response = self.client.post("/travel-cities", data=self.answers(yes_count))
                 self.assert_redirect(response, "/instructions" if eligible else "/screened-out-cities")
                 with self.client.session_transaction() as browser_session:
                     expected = {"consent_accepted": True, "travel_intro_seen": True}
                     expected.update({"travel_screening_complete": server.SCREENING_VERSION} if eligible else {"travel_screened_out": True})
+                    if eligible:
+                        expected["screening_submission_id"] = browser_session["screening_submission_id"]
                     self.assertEqual(dict(browser_session), expected)
+                with server.rooms_lock:
+                    self.assertEqual(len(server.screening_submissions), before_count + int(eligible))
                 if eligible:
                     self.assert_all_gates_blocked("/instructions")
                 else:
@@ -177,8 +187,12 @@ class TravelScreeningTests(unittest.TestCase):
                             del data[key]
                         else:
                             data[key] = invalid
+                        with server.rooms_lock:
+                            before = deepcopy(server.screening_submissions)
                         response = self.client.post("/travel-cities", data=data)
                         self.assertEqual(response.status_code, 400)
+                        with server.rooms_lock:
+                            self.assertEqual(server.screening_submissions, before)
                         checked = {entry["name"]: entry["value"] for entry in FormParser(response).inputs if "checked" in entry}
                         self.assertEqual(checked, {name: value for name, value in data.items() if name != key})
                         with self.client.session_transaction() as browser_session:
@@ -200,6 +214,181 @@ class TravelScreeningTests(unittest.TestCase):
             data = MultiDict(self.answers())
             data.add(key, data[key])
             self.assertEqual(self.client.post("/travel-cities", data=data).status_code, 400)
+        with server.rooms_lock:
+            self.assertEqual(server.screening_submissions, {})
+
+    def retained(self, client=None):
+        client = client or self.client
+        with client.session_transaction() as browser_session:
+            submission_id = browser_session["screening_submission_id"]
+        with server.rooms_lock:
+            return submission_id, deepcopy(server.screening_submissions[submission_id])
+
+    def test_retained_canonical_answers_server_utc_timestamp_and_cookie_privacy(self):
+        self.begin_screening()
+        answers = self.answers(9)
+        for index, (city_id, _, _) in enumerate(EXPECTED_CITIES):
+            answers[f"familiarity_{city_id}"] = str(index % 7 + 1)
+        before = datetime.now(timezone.utc)
+        self.assert_redirect(self.client.post("/travel-cities", data=answers), "/instructions")
+        after = datetime.now(timezone.utc)
+        submission_id, record = self.retained()
+        self.assertRegex(submission_id, r"^[0-9a-f]{64}$")
+        self.assertEqual(set(record), {"version", "timestamp", "answers"})
+        self.assertEqual(record["version"], server.SCREENING_VERSION)
+        timestamp = datetime.fromisoformat(record["timestamp"])
+        self.assertEqual(timestamp.tzinfo, timezone.utc)
+        self.assertLessEqual(before.replace(microsecond=0), timestamp)
+        self.assertLessEqual(timestamp, after)
+        self.assertEqual(list(record["answers"]), [city_id for city_id, _, _ in EXPECTED_CITIES])
+        self.assertEqual(record["answers"], {
+            city_id: {"visited": answers[f"visited_{city_id}"], "familiarity": int(answers[f"familiarity_{city_id}"])}
+            for city_id, _, _ in EXPECTED_CITIES
+        })
+        # Decode the actual signed cookie, rather than assuming it is encrypted.
+        cookie = self.client.get_cookie(server.app.config["SESSION_COOKIE_NAME"])
+        decoded = server.app.session_interface.get_signing_serializer(server.app).loads(cookie.value)
+        self.assertEqual(decoded, {
+            "consent_accepted": True, "travel_intro_seen": True,
+            "travel_screening_complete": server.SCREENING_VERSION,
+            "screening_submission_id": submission_id,
+        })
+        self.assertNotIn(record["timestamp"], str(decoded))
+        for city_id, _, _ in EXPECTED_CITIES:
+            self.assertNotIn(city_id, str(decoded))
+
+    def test_record_and_reference_stable_on_refresh_start_and_reaccept(self):
+        self.begin_screening()
+        self.client.post("/travel-cities", data=self.answers())
+        retained = self.retained()
+        self.client.post("/instructions")
+        for _ in range(2):
+            for path in ("/start", "/consent", "/travel-intro", "/travel-cities", "/instructions", "/room"):
+                self.client.get(path)
+            for decision in ("accept", "deny", "accept"):
+                self.client.post("/consent", data={"decision": decision})
+            self.client.post("/travel-cities", data=self.answers(0))
+            self.assertEqual(self.retained(), retained)
+        with server.rooms_lock:
+            self.assertEqual(len(server.screening_submissions), 1)
+
+    def test_client_supplied_private_keys_cannot_select_or_overwrite_records(self):
+        self.begin_screening()
+        self.client.post("/travel-cities", data=self.answers())
+        original_client = self.client
+        original_id, original = self.retained()
+        self.client = server.app.test_client()
+        self.begin_screening()
+        malicious = {
+            "screening_submission_id": original_id, "submission_id": original_id,
+            "timestamp": "2000-01-01T00:00:00+00:00", "version": "forged",
+            "travel_screening_complete": server.SCREENING_VERSION,
+            "answers": "forged", "truth": "forged", "visited_unknown-city": "yes",
+        }
+        # A query parameter alone cannot turn synthetic completion into retention.
+        with self.client.session_transaction() as browser_session:
+            browser_session["travel_screening_complete"] = server.SCREENING_VERSION
+        self.assert_redirect(self.client.get(f"/room?screening_submission_id={original_id}"), "/travel-intro")
+        response = self.client.post(f"/travel-cities?screening_submission_id={original_id}", data={**self.answers(15, "7"), **malicious})
+        self.assert_redirect(response, "/instructions")
+        new_id, new_record = self.retained()
+        self.assertNotEqual(new_id, original_id)
+        self.assertEqual(self.retained(original_client), (original_id, original))
+        self.assertEqual(new_record["version"], server.SCREENING_VERSION)
+        self.assertNotEqual(new_record["timestamp"], malicious["timestamp"])
+        self.assertEqual(new_record["answers"]["westminster"], {"visited": "no", "familiarity": 7})
+        self.assertEqual(set(new_record), {"answers", "timestamp", "version"})
+        # Clearing one browser's progress must not clear either private record.
+        with self.client.session_transaction() as browser_session:
+            browser_session.clear()
+        self.client.get("/start")
+        with server.rooms_lock:
+            self.assertEqual(set(server.screening_submissions), {original_id, new_id})
+        self.assertEqual(self.retained(original_client), (original_id, original))
+
+    def test_missing_or_outdated_record_blocks_all_completed_room_and_chat_gates(self):
+        for failure in ("no-reference", "missing-record", "record-version", "completion-version"):
+            with self.subTest(failure=failure):
+                self.client = server.app.test_client()
+                self.begin_screening()
+                self.client.post("/travel-cities", data=self.answers())
+                self.client.post("/instructions")
+                submission_id, _ = self.retained()
+                with self.client.session_transaction() as browser_session:
+                    if failure == "no-reference":
+                        browser_session.pop("screening_submission_id")
+                    elif failure == "completion-version":
+                        browser_session["travel_screening_complete"] = "obsolete"
+                with server.rooms_lock:
+                    if failure == "missing-record":
+                        server.screening_submissions.pop(submission_id)
+                    elif failure == "record-version":
+                        server.screening_submissions[submission_id]["version"] = "obsolete"
+                self.assert_all_gates_blocked("/travel-intro")
+                self.assert_redirect(self.client.get("/consent"), "/travel-intro")
+                self.accept_consent()
+                self.assertEqual(self.client.get("/travel-intro").status_code, 200)
+                self.assertEqual(self.client.get("/travel-cities").status_code, 200)
+                self.assert_redirect(self.client.post("/instructions"), "/travel-intro")
+                self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/instructions")
+                self.assertNotEqual(self.retained()[0], submission_id)
+                self.assert_all_gates_blocked("/instructions")
+
+    def test_private_room_association_and_chat_payloads_and_missing_record_recovery(self):
+        first = self.client
+        self.begin_screening()
+        first.post("/travel-cities", data=self.answers(5, "1"))
+        first_id, first_record = self.retained(first)
+        self.client = server.app.test_client()
+        second = self.client
+        self.begin_screening()
+        second.post("/travel-cities", data=self.answers(15, "7"))
+        second_id, second_record = self.retained(second)
+        self.assertNotEqual(first_id, second_id)
+        for client, pid, other_id in ((first, "first", second_id), (second, "second", first_id)):
+            client.post("/instructions")
+            response = client.post("/api/rooms", json={"participant_id": pid, "screening_submission_id": other_id, "answers": "forged"})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(set(response.get_json()), {"code", "status"} if pid == "first" else {"code", "status", "role"})
+        with server.rooms_lock:
+            self.assertEqual(server.rooms["ROOM01"]["screening_submission_ids"], {"first": first_id, "second": second_id})
+        for client in (first, second):
+            status = client.get("/api/rooms/ROOM01").get_json()
+            self.assertEqual(set(status), {"code", "status", "role", "chat_ready"})
+            client.post("/role-instructions")
+        sent = first.post("/api/rooms/ROOM01/messages", json={
+            "participant_id": "first", "text": "Hello", "screening_submission_id": second_id,
+            "answers": first_record["answers"], "truth": "forged", "timestamp": "forged",
+        })
+        self.assertEqual(sent.status_code, 201)
+        self.assertEqual(set(sent.get_json()), {"message"})
+        self.assertEqual(set(sent.get_json()["message"]), {"id", "participant_id", "role", "text"})
+        for client, pid in ((first, "first"), (second, "second")):
+            received = client.get(f"/api/rooms/ROOM01/messages?participant_id={pid}").get_json()
+            self.assertEqual(set(received), {"messages", "partner_typing"})
+            self.assertEqual(received["messages"], [sent.get_json()["message"]])
+            visible = str(received) + client.get("/dialogue").get_data(as_text=True)
+            for private_value in (first_id, second_id, first_record["timestamp"], second_record["timestamp"], "familiarity", "screening_submission_ids"):
+                self.assertNotIn(private_value, visible)
+        # Simulate lost private state with the signed cookie and room still present.
+        with server.rooms_lock:
+            server.screening_submissions.pop(first_id)
+        self.assert_redirect(first.get("/dialogue"), "/travel-intro")
+        self.assertEqual(first.get("/api/rooms/ROOM01").status_code, 403)
+        self.assertEqual(first.post("/api/rooms/ROOM01/messages", json={"participant_id": "first", "text": "Blocked"}).status_code, 403)
+        self.assertEqual(first.get("/api/rooms/ROOM01/messages?participant_id=first").status_code, 403)
+        self.assertEqual(first.post("/api/rooms/ROOM01/typing", json={"participant_id": "first"}).status_code, 403)
+        self.assert_redirect(first.post("/travel-cities", data=self.answers(6, "3")), "/instructions")
+        replacement_id, _ = self.retained(first)
+        self.assertNotEqual(replacement_id, first_id)
+        self.assertEqual(self.retained(second), (second_id, second_record))
+        with server.rooms_lock:
+            self.assertEqual(server.rooms["ROOM01"]["screening_submission_ids"], {"first": replacement_id, "second": second_id})
+            self.assertEqual(server.rooms["ROOM01"]["ready"], {"first", "second"})
+            self.assertEqual(len(server.rooms["ROOM01"]["messages"]), 1)
+        first.post("/instructions")
+        self.assertEqual(first.post("/api/rooms", json={"participant_id": "first"}).status_code, 200)
+        self.assertEqual(first.get("/dialogue").status_code, 200)
 
     def test_screen_out_survives_return_and_resubmission(self):
         self.begin_screening()
@@ -226,7 +415,11 @@ class TravelScreeningTests(unittest.TestCase):
                 self.assertEqual(self.client.get("/travel-cities").status_code, 200)
                 self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/instructions")
                 with self.client.session_transaction() as browser_session:
-                    self.assertEqual(dict(browser_session), {"consent_accepted": True, "travel_intro_seen": True, "travel_screening_complete": server.SCREENING_VERSION})
+                    self.assertEqual(dict(browser_session), {
+                        "consent_accepted": True, "travel_intro_seen": True,
+                        "travel_screening_complete": server.SCREENING_VERSION,
+                        "screening_submission_id": browser_session["screening_submission_id"],
+                    })
                 self.assert_all_gates_blocked("/instructions")
 
     def test_current_completion_still_requires_intro_and_screen_out_takes_precedence(self):

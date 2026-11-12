@@ -7,7 +7,7 @@
   <title>Entry verification | The Deception Game</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
   {% if site_key %}
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script> <!-- Load Cloudflare Turnstile API -->
   {% endif %}
 </head>
 <body>
@@ -21,7 +21,7 @@
       <p role="alert">{{ error }}</p>
       {% endif %}
       {% if site_key %}
-      <form method="post" action="{{ url_for('verify_human') }}" aria-labelledby="verification-title">
+      <form method="post" action="{{ url_for('verify_human') }}" aria-labelledby="verification-title"> <!-- Human verification form; sends POST request with Turnstile response which is a token proving the user completed the check successfully to the server for verification -->
         <div class="cf-turnstile" data-sitekey="{{ site_key }}" data-action="study-entry" data-size="flexible" data-theme="light"></div>
         <p class="travel-supporting">Once the check is complete, select Continue.</p>
         <button class="button travel-primary" type="submit">Continue</button>

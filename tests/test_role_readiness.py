@@ -12,12 +12,14 @@ class RoleReadinessTests(unittest.TestCase):
         self.addCleanup(config.stop)
         with server.rooms_lock:
             server.rooms.clear()
+            server.screening_submissions.clear()
         self.first = self.eligible_client()
         self.second = self.eligible_client()
 
     def tearDown(self):
         with server.rooms_lock:
             server.rooms.clear()
+            server.screening_submissions.clear()
 
     def eligible_client(self):
         """Use separate real consent, screening and pre-match sessions."""
@@ -68,8 +70,12 @@ class RoleReadinessTests(unittest.TestCase):
             response = client.get(f"/role-instructions?role={other_role}&chat-role={other_role}")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.headers["Cache-Control"], "no-store")
-            self.assertIn(f"{role.capitalize()} instructions will be added here.".encode(), response.data)
-            self.assertNotIn(f"{other_role.capitalize()} instructions will be added here.".encode(), response.data)
+            private_text = {
+                "interviewer": b"Your task is to decide whether their claim about visiting a city is true.",
+                "interviewee": b"Your task is to convince them that your claim about visiting a city is true.",
+            }
+            self.assertIn(private_text[role], response.data)
+            self.assertNotIn(private_text[other_role], response.data)
             self.assertNotIn(other_pid.encode(), response.data)
             self.assertIn(b"I'm ready", response.data)
             self.assertEqual(client.get("/dialogue").location, "/role-instructions")

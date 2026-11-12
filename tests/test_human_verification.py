@@ -12,6 +12,7 @@ from urllib.parse import parse_qs
 from werkzeug.datastructures import MultiDict
 
 import server
+from screening_fixtures import retain_eligible_submission
 
 
 class HumanVerificationTests(unittest.TestCase):
@@ -34,7 +35,13 @@ class HumanVerificationTests(unittest.TestCase):
         self.client = server.app.test_client()
         with server.rooms_lock:
             server.rooms.clear()
-        self.addCleanup(server.rooms.clear)
+            server.screening_submissions.clear()
+        self.addCleanup(self.clear_private_state)
+
+    def clear_private_state(self):
+        with server.rooms_lock:
+            server.rooms.clear()
+            server.screening_submissions.clear()
 
     def upstream(self, payload=None, raw=None):
         if raw is None:
@@ -118,6 +125,7 @@ class HumanVerificationTests(unittest.TestCase):
             "travel_screening_complete": server.SCREENING_VERSION,
             "instructions_complete": True, "room_code": "ROOM01",
             "room_participant_id": "first", "room_token": "unit-test-room-token",
+            "screening_submission_id": retain_eligible_submission(self.client),
         }
         with self.client.session_transaction() as browser_session:
             browser_session.update(progress)
@@ -174,6 +182,7 @@ class HumanVerificationTests(unittest.TestCase):
             self.assertEqual(client.post("/verify-human", data={
                 "cf-turnstile-response": "unit-test-response-token",
             }).location, "/")
+            retain_eligible_submission(client)
             with client.session_transaction() as browser_session:
                 browser_session.update(
                     consent_accepted=True, travel_intro_seen=True,

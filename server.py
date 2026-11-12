@@ -32,21 +32,24 @@ app.config["SECRET_KEY"] = app.config["FLASK_SECRET_KEY"] or (
 )
 rooms = {}
 rooms_lock = Lock()
-ROOM_CODES = tuple(f"ROOM{number:02d}" for number in range(1, 21))
+# Private eligible answers and room associations share rooms_lock. Never serialize
+# these records into a browser session, template, or API response.
+screening_submissions = {}
+ROOM_CODES = tuple(f"ROOM{number:02d}" for number in range(1, 10001))
 SCREENING_VERSION = "english-cities-v1"
 TURNSTILE_ACTION = "study-entry"
 TURNSTILE_TIMEOUT_SECONDS = 5
 TURNSTILE_MAX_RESPONSE_BYTES = 16384
 
 
-def _human_verification_configured():
+def _human_verification_configured(): # Returns True if human verification is properly configured.
     return all((
         app.config["TURNSTILE_SITE_KEY"],
         app.config["TURNSTILE_SECRET_KEY"],
         app.config["TURNSTILE_HOSTNAMES"],
         app.config["FLASK_SECRET_KEY"],
         app.config["SECRET_KEY"] == app.config["FLASK_SECRET_KEY"],
-    ))
+    )) # Returns True if all required human verification configuration is present and valid.
 
 
 def _human_verification_fingerprint():
@@ -66,35 +69,36 @@ def _human_verified():
     )
 
 
-def _verification_unavailable():
+def _verification_unavailable(): # Returns a response indicating that human verification is temporarily unavailable.
     message = "Entry verification is temporarily unavailable. Please try again later."
     if request.path.startswith("/api/"):
         return jsonify(error=message, verification_url=url_for("verify_human")), 503
     return render_template("verify_human.html", error=message, site_key=None), 503
 
 
-@app.before_request
-def require_human_verification():
+@app.before_request # Ensures that human verification is completed before processing any request.
+def require_human_verification(): # Redirects to human verification if not already verified.
     if (
         not app.config["TURNSTILE_ENABLED"]
         or request.endpoint in (None, "static", "verify_human")
-    ):
+    ): # Skip human verification for static files, the verification page itself, or if Turnstile is disabled.
         return None
-    if not _human_verification_configured():
+    if not _human_verification_configured(): # Returns an error page if human verification is not properly configured.
         return _verification_unavailable()
-    if _human_verified():
+    if _human_verified(): # Skip human verification if already verified.
         return None
-    if request.path.startswith("/api/"):
+    if request.path.startswith("/api/"): # Return a JSON error for API requests if human verification is not completed.
         return jsonify(
             error="Please complete entry verification before continuing.",
             verification_url=url_for("verify_human"),
         ), 403
     # Never replay a blocked POST or accept a browser-supplied redirect target.
+    # Redirect browser requests to the human verification page if not verified.
     return redirect(url_for("verify_human"))
 
 
-@app.after_request
-def prevent_verification_caching(response):
+@app.after_request # Ensures that the human verification page is not cached by the browser.
+def prevent_verification_caching(response): # Modify response headers to prevent caching of the verification page.
     if request.endpoint == "verify_human" or (
         app.config["TURNSTILE_ENABLED"] and request.endpoint != "static"
     ):
@@ -102,24 +106,24 @@ def prevent_verification_caching(response):
     return response
 
 
-@app.route("/verify-human", methods=["GET", "POST"])
-def verify_human():
-    if not app.config["TURNSTILE_ENABLED"]:
+@app.route("/verify-human", methods=["GET", "POST"]) # Route for handling human verification page and form submission.
+def verify_human(): # Handles the human verification logic for GET and POST requests.
+    if not app.config["TURNSTILE_ENABLED"]: # Redirect to landing page if Turnstile is not enabled.
         return redirect(url_for("landing"))
-    if not _human_verification_configured():
+    if not _human_verification_configured(): # Return error page if human verification is not properly configured.
         return _verification_unavailable()
-    if _human_verified():
+    if _human_verified(): # Redirect to landing page if already verified.
         return redirect(url_for("landing"))
 
-    error = None
+    error = None # Initialize error message for display if verification fails.
     status_code = 200
-    if request.method == "POST":
-        tokens = request.form.getlist("cf-turnstile-response")
+    if request.method == "POST": # Handle form submission for human verification.
+        tokens = request.form.getlist("cf-turnstile-response") # Retrieve Turnstile response token from form.
         token = tokens[0] if len(tokens) == 1 else ""
-        if not token.strip() or len(token) > 2048:
+        if not token.strip() or len(token) > 2048: # Validate token presence and length.
             error = "Please complete the verification below and try again."
             status_code = 400
-        else:
+        else: # Proceed with server-side verification of the Turnstile token.
             verification_request = Request(
                 "https://challenges.cloudflare.com/turnstile/v0/siteverify",
                 data=urlencode({
@@ -127,37 +131,37 @@ def verify_human():
                 }).encode("utf-8"),
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 method="POST",
-            )
+            ) # Construct the HTTP request for Turnstile verification.
             try:
-                with urlopen(verification_request, timeout=TURNSTILE_TIMEOUT_SECONDS) as upstream:
-                    raw = upstream.read(TURNSTILE_MAX_RESPONSE_BYTES + 1)
-                if len(raw) > TURNSTILE_MAX_RESPONSE_BYTES:
+                with urlopen(verification_request, timeout=TURNSTILE_TIMEOUT_SECONDS) as upstream: # Send the verification request to Cloudflare Turnstile.
+                    raw = upstream.read(TURNSTILE_MAX_RESPONSE_BYTES + 1) # Read the response with a size limit.
+                if len(raw) > TURNSTILE_MAX_RESPONSE_BYTES: # Check if response exceeds the maximum allowed size.
                     raise ValueError("Verification response exceeds limit")
-                result = json.loads(raw)
-                if not isinstance(result, dict) or type(result.get("success")) is not bool:
+                result = json.loads(raw) # Parse the JSON response.
+                if not isinstance(result, dict) or type(result.get("success")) is not bool: # Validate the structure of the response.
                     raise ValueError("Invalid verification response")
-                if result["success"] is True and (
+                if result["success"] is True and ( # Further validate the response fields if verification succeeded.
                     not isinstance(result.get("action"), str)
                     or not isinstance(result.get("hostname"), str)
                 ):
-                    raise ValueError("Invalid verification response")
+                    raise ValueError("Invalid verification response") # Raise error if required fields are missing or of incorrect type.
                 if (
                     result["success"] is True
                     and result.get("action") == TURNSTILE_ACTION
                     and result.get("hostname") in app.config["TURNSTILE_HOSTNAMES"]
-                ):
-                    session["human_verified"] = True
-                    session["human_verification_config"] = _human_verification_fingerprint()
-                    return redirect(url_for("landing"))
-                error = "Verification was not successful. Please complete a new check and try again."
-                status_code = 400
+                ): # Check if verification succeeded and the action and hostname are valid.
+                    session["human_verified"] = True # Mark the session as human-verified.
+                    session["human_verification_config"] = _human_verification_fingerprint() # Store the human verification fingerprint in the session.
+                    return redirect(url_for("landing")) # Redirect to the landing page after successful verification.
+                error = "Verification was not successful. Please complete a new check and try again." # Set error message for failed verification.
+                status_code = 400 # Set HTTP status code for failed verification.
             except (URLError, OSError, HTTPException, ValueError, RecursionError):
                 # Do not log exceptions: upstream messages can contain submitted secrets.
                 error = "Verification could not be completed. Please try the check again."
                 status_code = 503
     return render_template(
         "verify_human.html", error=error, site_key=app.config["TURNSTILE_SITE_KEY"],
-    ), status_code
+    ), status_code # Return the verification page with the appropriate status code.
 
 
 def consent_required(view):
@@ -173,10 +177,14 @@ def consent_required(view):
 
 
 def _screening_complete():
-    return (
-        session.get("travel_intro_seen") is True
-        and session.get("travel_screening_complete") == SCREENING_VERSION
-    )
+    with rooms_lock: # Ensure thread-safe access to screening submissions; ensures screening answers were actually retrieved safely.
+        submission = screening_submissions.get(session.get("screening_submission_id"))
+        return (
+            session.get("travel_intro_seen") is True
+            and session.get("travel_screening_complete") == SCREENING_VERSION
+            and submission is not None
+            and submission["version"] == SCREENING_VERSION
+        ) # Return True if the screening is complete, False otherwise.
 
 
 def screening_required(view):
@@ -349,6 +357,27 @@ def travel_cities():
             session.pop("other_cities_complete", None)
             session.pop("instructions_complete", None)
             if yes_count >= 5 and len(CANDIDATE_CITIES) - yes_count >= 5:
+                with rooms_lock:
+                    # Only server-generated IDs select records. Ignore extra form
+                    # keys, including IDs, timestamps, versions and truth fields.
+                    submission_id = token_hex(32)
+                    screening_submissions[submission_id] = {
+                        "version": SCREENING_VERSION,
+                        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                        "answers": {
+                            city_id: {
+                                "visited": values[f"visited_{city_id}"],
+                                "familiarity": int(values[f"familiarity_{city_id}"]),
+                            }
+                            for city_id, _, _ in CANDIDATE_CITIES
+                        },
+                    }
+                    # Re-screening replaces only this owner's room reference;
+                    # no participant's retained record is deleted or overwritten.
+                    bound_room, participant_id = _bound_room(session.get("room_code", ""))
+                    if bound_room is not None:
+                        bound_room["screening_submission_ids"][participant_id] = submission_id
+                    session["screening_submission_id"] = submission_id
                 session["travel_screening_complete"] = SCREENING_VERSION
                 return redirect(url_for("instructions"))
             session.pop("travel_screening_complete", None)
@@ -446,11 +475,13 @@ def match_room(): # Handles the API request to match a participant to a room
                 return jsonify(error="All rooms are currently occupied."), 409
             token = token_hex(32)
             rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}, "ready": set(), "owners": {participant_id: token}}
+            rooms[code]["screening_submission_ids"] = {participant_id: session["screening_submission_id"]} # Store the screening submission ID for the participant in the room; for creating a new room.
             session.update(room_code=code, room_participant_id=participant_id, room_token=token)
             return jsonify(code=code, status="waiting")
 
         token = token_hex(32)
         rooms[code]["owners"][participant_id] = token
+        rooms[code]["screening_submission_ids"][participant_id] = session["screening_submission_id"] # Store the screening submission ID for the participant in the room; if room exists, update it with the new participant's ID.
         session.update(room_code=code, room_participant_id=participant_id, room_token=token)
         participants = rooms[code]["participants"]
         participants[participant_id] = None

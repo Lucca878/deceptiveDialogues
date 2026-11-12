@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 import server
+from screening_fixtures import retain_eligible_submission
 
 
 class RoomMatchingTests(unittest.TestCase):
@@ -14,13 +15,16 @@ class RoomMatchingTests(unittest.TestCase):
         self.clients = {}
         with server.rooms_lock:
             server.rooms.clear()
+            server.screening_submissions.clear()
 
     def tearDown(self):
         with server.rooms_lock:
             server.rooms.clear()
+            server.screening_submissions.clear()
 
     def client(self):
         client = server.app.test_client()
+        retain_eligible_submission(client)
         with client.session_transaction() as browser_session:
             browser_session["consent_accepted"] = True
             browser_session["travel_intro_seen"] = True
