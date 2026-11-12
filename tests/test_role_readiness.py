@@ -98,13 +98,48 @@ class RoleReadinessTests(unittest.TestCase):
 
         self.second.post("/role-instructions")
         for client, pid in ((self.first, "first"), (self.second, "second")):
+            early_typing = client.post(
+                "/api/rooms/ROOM01/typing",
+                json={"participant_id": pid},
+            )
+            self.assertEqual(early_typing.status_code, 403)
+            self.assertIn("opening claim", early_typing.get_json()["error"])
+            early_message = client.post(
+                "/api/rooms/ROOM01/messages",
+                json={"participant_id": pid, "text": "Too early"},
+            )
+            self.assertEqual(early_message.status_code, 403)
+            self.assertIn("opening claim", early_message.get_json()["error"])
+        self.assertEqual(server.rooms["ROOM01"]["messages"], [])
+        self.assertIsNone(server.rooms["ROOM01"]["current_claim"])
+        self.assertEqual(server.rooms["ROOM01"]["typing"], {})
+
+        for client, pid in ((self.first, "first"), (self.second, "second")):
             self.assertTrue(self.status(client)["chat_ready"])
             self.assertEqual(client.get("/role-instructions").location, "/dialogue")
             self.assertEqual(client.get("/dialogue").status_code, 200)
             self.assertEqual(client.post("/api/rooms/ROOM01/messages", json={"participant_id": pid, "text": "Hello", "role": "spoof"}).status_code, 201)
-            self.assertEqual(client.get(f"/api/rooms/ROOM01/messages?participant_id={pid}").status_code, 200)
+            messages_response = client.get(f"/api/rooms/ROOM01/messages?participant_id={pid}")
+            self.assertEqual(messages_response.status_code, 200)
+            visible_messages = messages_response.get_json()["messages"]
+            self.assertEqual(visible_messages[0]["role"], "interviewee")
+            self.assertEqual(set(visible_messages[0]), {"id", "participant_id", "role", "text"})
+            self.assertNotIn("truth_status", str(visible_messages))
             self.assertEqual(client.post("/api/rooms/ROOM01/typing", json={"participant_id": pid}).status_code, 200)
-        self.assertEqual(server.rooms["ROOM01"]["messages"][0]["role"], self.status(self.first)["role"])
+        room = server.rooms["ROOM01"]
+        interviewee_id = next(pid for pid, role in room["participants"].items() if role == "interviewee")
+        submission_id = room["screening_submission_ids"][interviewee_id]
+        submission = server.screening_submissions[submission_id]
+        city_id = submission["order"][0]
+        city_name = next(name for candidate_id, name, _ in server.CANDIDATE_CITIES if candidate_id == city_id)
+        self.assertEqual(len(room["messages"]), 3)  # One claim plus each participant's message.
+        self.assertEqual(room["messages"][0]["id"], 1)
+        self.assertEqual(room["messages"][0]["participant_id"], interviewee_id)
+        self.assertEqual(room["messages"][0]["text"], f"I have visited {city_name}.")
+        self.assertEqual(room["current_claim"], {
+            "city_id": city_id,
+            "truth_status": submission["answers"][city_id]["visited"] == "yes",
+        })
 
     def test_swapped_ids_and_new_session_cannot_claim_membership(self):
         self.pair()

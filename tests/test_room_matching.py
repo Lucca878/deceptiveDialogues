@@ -93,6 +93,7 @@ class RoomMatchingTests(unittest.TestCase):
         partner.post("/api/rooms", json={"participant_id": "second"})
         client.post("/role-instructions")
         partner.post("/role-instructions")
+        self.assertEqual(client.get("/dialogue").status_code, 200)
 
         sent = client.post(
             "/api/rooms/ROOM01/messages",
@@ -101,7 +102,7 @@ class RoomMatchingTests(unittest.TestCase):
         self.assertEqual(sent.status_code, 201)
         self.assertNotIn("timestamp", sent.get_json()["message"])
 
-        stored_message = server.rooms["ROOM01"]["messages"][0]
+        stored_message = server.rooms["ROOM01"]["messages"][-1]
         timestamp = datetime.fromisoformat(stored_message["timestamp"])
         self.assertEqual(timestamp.tzinfo, timezone.utc)
         self.assertNotEqual(stored_message["timestamp"], "client value")
@@ -109,7 +110,8 @@ class RoomMatchingTests(unittest.TestCase):
         received = client.get(
             "/api/rooms/ROOM01/messages?participant_id=first&after_id=0"
         ).get_json()
-        self.assertNotIn("timestamp", received["messages"][0])
+        sent_message = next(message for message in received["messages"] if message["text"] == "Hello")
+        self.assertNotIn("timestamp", sent_message)
 
 
 if __name__ == "__main__":

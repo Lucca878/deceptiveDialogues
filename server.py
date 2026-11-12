@@ -269,6 +269,54 @@ def dialogue():
             return redirect(url_for("room"))
         if not _chat_ready(room):
             return redirect(url_for("role_instructions"))
+        # If there is no current claim, generate one based on the interviewee's next city and screening answers.
+        if room["current_claim"] is None:
+            # Identify the interviewee and retrieve their next city and corresponding screening answer.
+            interviewee_id = next(
+                (pid for pid, role in room["participants"].items() if role == "interviewee"),
+                None,
+            )
+            # Retrieve the screening submission for the interviewee.
+            submission_id = room["screening_submission_ids"].get(interviewee_id)
+            # Look up the submission in the global screening_submissions dictionary.
+            submission = screening_submissions.get(submission_id)
+            # Extract the order of cities from the submission, if available.
+            order = submission.get("order") if submission else None
+            # Determine the next city the interviewee is supposed to discuss.
+            next_city = order[0] if order else None
+            # Retrieve the interviewee's answer for the next city.
+            answer = submission["answers"].get(next_city) if submission and next_city else None
+            # Look up the human-readable city name for the next city.
+            city_name = next(
+                (name for city_id, name, _ in CANDIDATE_CITIES if city_id == next_city),
+                None,
+            )
+            # If any of the required information is missing or invalid, return an error.
+            if (
+                interviewee_id is None
+                or answer is None
+                or answer.get("visited") not in ("yes", "no")
+                or city_name is None
+            ):
+                return "The dialogue claim could not be loaded. Please contact the researcher.", 409
+            # Construct the claim message based on the interviewee's answer and the city name.
+            claim_message = {
+                "id": len(room["messages"]) + 1,
+                "participant_id": interviewee_id,
+                "role": "interviewee",
+                "text": f"I have visited {city_name} in the past three years.",
+                "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            }
+            # Append the claim message to the room's message list.
+            room["messages"].append(claim_message)
+            # Keep correctness metadata server-side; client message projection omits it.
+            room["current_claim"] = {
+                "city_id": next_city,
+                "truth_status": answer["visited"] == "yes",
+            }
+            # Discard any typing pings sent before the opening claim was created.
+            room["typing"].clear()
+            # The current claim now reflects the interviewee's latest response.
         return render_template("dialogue.html")
 
 
@@ -489,7 +537,7 @@ def match_room(): # Handles the API request to match a participant to a room
             if code is None:
                 return jsonify(error="All rooms are currently occupied."), 409
             token = token_hex(32)
-            rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}, "ready": set(), "owners": {participant_id: token}}
+            rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}, "ready": set(), "owners": {participant_id: token}, "current_claim": None}
             rooms[code]["screening_submission_ids"] = {participant_id: session["screening_submission_id"]} # Store the screening submission ID for the participant in the room; for creating a new room.
             session.update(room_code=code, room_participant_id=participant_id, room_token=token)
             return jsonify(code=code, status="waiting")
@@ -549,6 +597,9 @@ def send_room_message(code): # Handles sending a message to a specific room by a
         room, participant_id = _bound_room(code, participant_id)
         if room is None or not _chat_ready(room):
             return jsonify(error="Both participants must be ready in your assigned room."), 403
+        # Ensure that the opening claim has been made before allowing messages to be sent
+        if room["current_claim"] is None:
+            return jsonify(error="The opening claim must be available before messages can be sent."), 403
         role = room["participants"][participant_id]
 
         message = {
@@ -580,6 +631,8 @@ def set_typing(code):
         room, participant_id = _bound_room(code, participant_id)
         if room is None or not _chat_ready(room):
             return jsonify(error="Both participants must be ready in your assigned room."), 403
+        if room["current_claim"] is None:
+            return jsonify(error="The opening claim must be available before typing."), 403
 
         room["typing"][participant_id] = monotonic() # Update the timestamp of the participant's last typing activity
     return jsonify(status="ok") # Return a success status after setting the typing indicator
