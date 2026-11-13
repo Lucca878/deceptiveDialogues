@@ -14,7 +14,15 @@
     </p>
 
     <section class="chat-panel" aria-label="Chat">
-      <p class="question-counter" id="question-counter" aria-live="polite" hidden></p>
+      <div class="question-progress" id="question-progress" hidden>
+        <div class="question-progress__labels">
+          <p class="question-counter" id="question-counter" aria-live="polite"></p>
+          <span class="question-progress__note" id="question-progress-note"></span>
+        </div>
+        <div class="question-progress__track" id="question-progress-track" role="progressbar" aria-label="Questions completed" aria-valuemin="0" aria-valuemax="10" aria-valuenow="0">
+          <span id="question-progress-fill"></span>
+        </div>
+      </div>
       <div class="chat-messages" id="chat-messages" aria-live="polite">
         <p class="chat-empty" id="chat-empty">Send a message to begin.</p>
       </div>

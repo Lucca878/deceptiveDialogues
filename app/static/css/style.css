@@ -762,7 +762,8 @@ h1 {
 /* ---------- Local dialogue prototype ---------- */
 .chat-page {
   width: min(100%, 56rem);
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   margin: 0 auto;
   padding: clamp(1rem, 4vw, 2.5rem);
   display: flex;
@@ -889,7 +890,7 @@ h1 {
 
 .chat-panel {
   flex: 1;
-  min-height: 24rem;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -898,13 +899,57 @@ h1 {
   background: var(--surface);
 }
 
-.question-counter {
+.question-progress {
   margin: 0;
-  padding: 0.6rem 1.25rem;
+  padding: 0.75rem 1.25rem 0.85rem;
   border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--paper) 72%, var(--surface));
+}
+
+.question-progress__labels {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.55rem;
+}
+
+.question-counter,
+.question-progress__note {
+  margin: 0;
   color: var(--muted);
   font-size: 0.8125rem;
-  text-align: center;
+}
+
+.question-counter {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.question-progress__note {
+  text-align: right;
+}
+
+.question-progress__track {
+  height: 0.35rem;
+  overflow: hidden;
+  border-radius: 1rem;
+  background: #dce1e7;
+}
+
+.question-progress__track span {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: #17653e;
+  transition: width 0.2s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .question-progress__track span {
+    transition: none;
+  }
 }
 
 .chat-messages {
@@ -1037,12 +1082,10 @@ h1 {
 
 @media (max-width: 40rem) {
   .chat-page {
-    min-height: 100svh;
+    height: 100vh;
+    height: 100svh;
+    height: 100dvh;
     padding: 1rem;
-  }
-
-  .chat-panel {
-    min-height: 60vh;
   }
 
   .room-join {

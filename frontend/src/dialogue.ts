@@ -13,7 +13,11 @@ const sendButton = getElement<HTMLButtonElement>(".chat-send"); // Send button
 const messages = getElement<HTMLDivElement>("#chat-messages"); // Container for chat messages
 const emptyState = getElement<HTMLParagraphElement>("#chat-empty"); // Empty state message element
 const typingIndicator = getElement<HTMLParagraphElement>("#chat-typing"); // Typing indicator element 
+const questionProgress = getElement<HTMLDivElement>("#question-progress"); // Question progress container
 const questionCounter = getElement<HTMLParagraphElement>("#question-counter"); // Server-provided question progress status
+const questionProgressNote = getElement<HTMLSpanElement>("#question-progress-note"); // Supporting question progress status
+const questionProgressTrack = getElement<HTMLDivElement>("#question-progress-track"); // Accessible progress bar
+const questionProgressFill = getElement<HTMLSpanElement>("#question-progress-fill"); // Visual progress bar fill
 
 const role = sessionStorage.getItem("chat-role"); // User's role in the chat (interviewer or interviewee)
 const roomCode = sessionStorage.getItem("chat-room-code"); // Active chat room code
@@ -99,10 +103,19 @@ if (
       if (!response.ok) throw new Error(data.error ?? "Could not load messages."); // Throw an error if the response is not OK
       canSend = data.can_send === true;  // Update the canSend flag based on the server's response
       if (Number.isInteger(data.question_number) && data.question_number! >= 1 && data.question_number! <= 10) {
-        questionCounter.textContent = data.question_turns_ended
-          ? "Questions complete. Please wait for the next step."
-          : `Question ${data.question_number} of 10`;
-        questionCounter.hidden = false;
+        const questionNumber = data.question_number!;
+        questionProgress.hidden = false;
+        questionProgressTrack.setAttribute("aria-valuenow", String(questionNumber));
+        questionProgressFill.style.width = `${questionNumber * 10}%`;
+        if (data.question_turns_ended) {
+          questionCounter.textContent = "Questions complete";
+          questionProgressNote.textContent = "Please wait for the next step.";
+          questionProgressTrack.setAttribute("aria-label", "All 10 questions completed");
+        } else {
+          questionCounter.textContent = `Question ${questionNumber} of 10`;
+          questionProgressNote.textContent = "";
+          questionProgressTrack.setAttribute("aria-label", "Questions completed");
+        }
       }
       typingIndicator.hidden = !data.partner_typing; // Show or hide the typing indicator based on the partner's typing status
 
