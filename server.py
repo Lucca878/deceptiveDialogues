@@ -314,6 +314,8 @@ def dialogue():
                 "city_id": next_city,
                 "truth_status": answer["visited"] == "yes",
             }
+            # Initialize the interviewer-question counter for this claim to zero. Store the count in this room's current_claim state, so it resets for each new claim.
+            room["current_claim"]["interviewer_question_count"] = 0
             # After creating the opening claim, set the room's next speaker to "interviewer".
             room["next_speaker"] = "interviewer"
             # Discard any typing pings sent before the opening claim was created.
@@ -604,6 +606,9 @@ def send_room_message(code): # Handles sending a message to a specific room by a
         if room["current_claim"] is None:
             return jsonify(error="The opening claim must be available before messages can be sent."), 403
         role = room["participants"][participant_id]
+        # Before accepting an interviewer message, reject it if this claim already has 10 questions
+        if role == "interviewer" and room["current_claim"]["interviewer_question_count"] >= 10:
+            return jsonify(error="This claim has already received 10 questions from the interviewer."), 403
         # Reject this request unless role matches the room's next allowed speaker.
         if role != room["next_speaker"]:
             return jsonify(error="It is not your turn to speak."), 403
@@ -616,8 +621,17 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }
         room["messages"].append(message)
-        # After accepting a message, switch the next allowed speaker to the other role.
-        room["next_speaker"] = "interviewer" if role == "interviewee" else "interviewee"
+        # If the accepted message is from the interviewer, increment this claim's question count.
+        if role == "interviewer":
+            room["current_claim"]["interviewer_question_count"] += 1
+        # When question 10 is asked, still allow the interviewee's tenth answer; after that answer, end question turns for this claim.
+        if room["current_claim"]["interviewer_question_count"] >= 10 and role == "interviewee":
+            room["current_claim"]["question_turns_ended"] = True
+        if room["current_claim"].get("question_turns_ended"):
+            room["next_speaker"] = None
+        else:
+            # Otherwise, switch the next allowed speaker to the other role.
+            room["next_speaker"] = "interviewer" if role == "interviewee" else "interviewee"
 
     return jsonify(message=_message_for_client(message)), 201 # Return the newly created message without its private timestamp
 
@@ -675,8 +689,22 @@ def get_room_messages(code):
             partner_id != participant_id and now - last < TYPING_WINDOW_SECONDS
             for partner_id, last in room["typing"].items()
         )
-        # Compute whether this session-bound participant's role matches room["next_speaker"].
+        current_claim = room["current_claim"]
+        question_count = current_claim["interviewer_question_count"] if current_claim else 0
+        question_turns_ended = bool(current_claim and current_claim.get("question_turns_ended"))
+        if question_turns_ended:
+            question_number = 10
+        elif room["next_speaker"] == "interviewee":
+            question_number = max(question_count, 1)
+        else:
+            question_number = min(question_count + 1, 10)
+        # This response is bound to the requester; it exposes no city answer or claim truth.
         can_send = room["next_speaker"] == room["participants"][participant_id]
 
-    # Include that participant-only permission as "can_send" in this JSON response.
-    return jsonify(messages=messages, partner_typing=partner_typing, can_send=can_send)
+    return jsonify(
+        messages=messages,
+        partner_typing=partner_typing,
+        can_send=can_send,
+        question_number=question_number,
+        question_turns_ended=question_turns_ended,
+    )

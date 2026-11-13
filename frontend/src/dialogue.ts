@@ -13,6 +13,7 @@ const sendButton = getElement<HTMLButtonElement>(".chat-send"); // Send button
 const messages = getElement<HTMLDivElement>("#chat-messages"); // Container for chat messages
 const emptyState = getElement<HTMLParagraphElement>("#chat-empty"); // Empty state message element
 const typingIndicator = getElement<HTMLParagraphElement>("#chat-typing"); // Typing indicator element 
+const questionCounter = getElement<HTMLParagraphElement>("#question-counter"); // Server-provided question progress status
 
 const role = sessionStorage.getItem("chat-role"); // User's role in the chat (interviewer or interviewee)
 const roomCode = sessionStorage.getItem("chat-room-code"); // Active chat room code
@@ -70,9 +71,7 @@ if (
     messages.append(bubble); // Append the chat message bubble to the messages container
     if (message.id === 1 && message.role === "interviewee") {
       openingClaimReceived = true;
-      input.disabled = false;
       input.placeholder = "Write a message...";
-      sendButton.disabled = false;
     }
     messages.scrollTop = messages.scrollHeight; // Scroll to the bottom of the messages container to show the latest message
   }
@@ -93,10 +92,18 @@ if (
         }>; // Array of new messages from the server
         partner_typing?: boolean;
         can_send?: boolean;
+        question_number?: number;
+        question_turns_ended?: boolean;
         error?: string;
       };
       if (!response.ok) throw new Error(data.error ?? "Could not load messages."); // Throw an error if the response is not OK
       canSend = data.can_send === true;  // Update the canSend flag based on the server's response
+      if (Number.isInteger(data.question_number) && data.question_number! >= 1 && data.question_number! <= 10) {
+        questionCounter.textContent = data.question_turns_ended
+          ? "Questions complete. Please wait for the next step."
+          : `Question ${data.question_number} of 10`;
+        questionCounter.hidden = false;
+      }
       typingIndicator.hidden = !data.partner_typing; // Show or hide the typing indicator based on the partner's typing status
 
       for (const message of data.messages ?? []) {

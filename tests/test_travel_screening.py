@@ -364,12 +364,17 @@ class TravelScreeningTests(unittest.TestCase):
             self.assertEqual(set(response.get_json()), {"code", "status"} if pid == "first" else {"code", "status", "role"})
         with server.rooms_lock:
             self.assertEqual(server.rooms["ROOM01"]["screening_submission_ids"], {"first": first_id, "second": second_id})
-        for client in (first, second):
+        roles = {}
+        for client, pid in ((first, "first"), (second, "second")):
             status = client.get("/api/rooms/ROOM01").get_json()
             self.assertEqual(set(status), {"code", "status", "role", "chat_ready"})
+            roles[status["role"]] = (client, pid)
             client.post("/role-instructions")
-        sent = first.post("/api/rooms/ROOM01/messages", json={
-            "participant_id": "first", "text": "Hello", "screening_submission_id": second_id,
+        for client, _ in ((first, "first"), (second, "second")):
+            self.assertEqual(client.get("/dialogue").status_code, 200)
+        interviewer, interviewer_id = roles["interviewer"]
+        sent = interviewer.post("/api/rooms/ROOM01/messages", json={
+            "participant_id": interviewer_id, "text": "Hello", "screening_submission_id": second_id,
             "answers": first_record["answers"], "truth": "forged", "timestamp": "forged",
         })
         self.assertEqual(sent.status_code, 201)
@@ -377,8 +382,10 @@ class TravelScreeningTests(unittest.TestCase):
         self.assertEqual(set(sent.get_json()["message"]), {"id", "participant_id", "role", "text"})
         for client, pid in ((first, "first"), (second, "second")):
             received = client.get(f"/api/rooms/ROOM01/messages?participant_id={pid}").get_json()
-            self.assertEqual(set(received), {"messages", "partner_typing"})
-            self.assertEqual(received["messages"], [sent.get_json()["message"]])
+            self.assertEqual(set(received), {"messages", "partner_typing", "can_send", "question_number", "question_turns_ended"})
+            self.assertEqual(len(received["messages"]), 2)
+            self.assertEqual(received["messages"][0]["role"], "interviewee")
+            self.assertEqual(received["messages"][1], sent.get_json()["message"])
             visible = str(received) + client.get("/dialogue").get_data(as_text=True)
             for private_value in (first_id, second_id, first_record["timestamp"], second_record["timestamp"], "familiarity", "screening_submission_ids"):
                 self.assertNotIn(private_value, visible)
@@ -397,7 +404,7 @@ class TravelScreeningTests(unittest.TestCase):
         with server.rooms_lock:
             self.assertEqual(server.rooms["ROOM01"]["screening_submission_ids"], {"first": replacement_id, "second": second_id})
             self.assertEqual(server.rooms["ROOM01"]["ready"], {"first", "second"})
-            self.assertEqual(len(server.rooms["ROOM01"]["messages"]), 1)
+            self.assertEqual(len(server.rooms["ROOM01"]["messages"]), 2)
         first.post("/instructions")
         self.assertEqual(first.post("/api/rooms", json={"participant_id": "first"}).status_code, 200)
         self.assertEqual(first.get("/dialogue").status_code, 200)

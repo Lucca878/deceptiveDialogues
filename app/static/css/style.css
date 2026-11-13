@@ -898,6 +898,15 @@ h1 {
   background: var(--surface);
 }
 
+.question-counter {
+  margin: 0;
+  padding: 0.6rem 1.25rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
 .chat-messages {
   flex: 1;
   min-height: 0;
