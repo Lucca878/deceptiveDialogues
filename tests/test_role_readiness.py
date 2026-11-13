@@ -114,19 +114,93 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertIsNone(server.rooms["ROOM01"]["current_claim"])
         self.assertEqual(server.rooms["ROOM01"]["typing"], {})
 
+        clients_by_role = {}
         for client, pid in ((self.first, "first"), (self.second, "second")):
-            self.assertTrue(self.status(client)["chat_ready"])
+            status = self.status(client)
+            self.assertTrue(status["chat_ready"])
             self.assertEqual(client.get("/role-instructions").location, "/dialogue")
             self.assertEqual(client.get("/dialogue").status_code, 200)
-            self.assertEqual(client.post("/api/rooms/ROOM01/messages", json={"participant_id": pid, "text": "Hello", "role": "spoof"}).status_code, 201)
+            clients_by_role[status["role"]] = (client, pid)
+
+        interviewer, interviewer_id = clients_by_role["interviewer"]
+        interviewee, interviewee_id = clients_by_role["interviewee"]
+        room = server.rooms["ROOM01"]
+        self.assertEqual(room["next_speaker"], "interviewer")
+        self.assertEqual(len(room["messages"]), 1)
+        # Check can_send is true only for the interviewer, then follows each accepted turn.
+        interviewer_poll = interviewer.get("/api/rooms/ROOM01/messages?participant_id=" + interviewer_id).get_json()
+        interviewee_poll = interviewee.get("/api/rooms/ROOM01/messages?participant_id=" + interviewee_id).get_json()
+        self.assertIs(interviewer_poll["can_send"], True)
+        self.assertIs(interviewee_poll["can_send"], False)
+
+        # After the claim appears, test that the interviewee's out-of-turn message is rejected.
+        interviewee_attempt = interviewee.post(
+            "/api/rooms/ROOM01/messages",
+            json={"participant_id": interviewee_id, "text": "Answer too early"},
+        )
+        self.assertEqual(interviewee_attempt.status_code, 403)
+        self.assertIn("not your turn", interviewee_attempt.get_json()["error"].lower())
+        self.assertEqual(room["next_speaker"], "interviewer")
+        self.assertEqual(len(room["messages"]), 1)
+        # Check that the server rejects an out-of-turn typing ping without changing the turn.
+        early_typing = interviewee.post(
+            "/api/rooms/ROOM01/typing",
+            json={"participant_id": interviewee_id},
+        )
+        self.assertEqual(early_typing.status_code, 403)
+        self.assertIn("not your turn", early_typing.get_json()["error"].lower())
+        self.assertEqual(room["typing"], {})
+        self.assertEqual(room["next_speaker"], "interviewer")
+
+        # Test that an accepted interviewer message makes the interviewee the next allowed speaker.
+        interviewer_message = interviewer.post(
+            "/api/rooms/ROOM01/messages",
+            json={"participant_id": interviewer_id, "text": "Question 1?", "role": "spoof"},
+        )
+        self.assertEqual(interviewer_message.status_code, 201)
+        self.assertEqual(interviewer_message.get_json()["message"]["role"], "interviewer")
+        self.assertEqual(room["next_speaker"], "interviewee")
+        self.assertEqual(len(room["messages"]), 2)
+        interviewer_poll = interviewer.get(f"/api/rooms/ROOM01/messages?participant_id={interviewer_id}").get_json()
+        interviewee_poll = interviewee.get(f"/api/rooms/ROOM01/messages?participant_id={interviewee_id}").get_json()
+        self.assertIs(interviewer_poll["can_send"], False)
+        self.assertIs(interviewee_poll["can_send"], True)
+
+        # Test that an out-of-turn rejection does not change whose turn it is.
+        rejected_repeat = interviewer.post(
+            "/api/rooms/ROOM01/messages",
+            json={"participant_id": interviewer_id, "text": "Another question too soon"},
+        )
+        self.assertEqual(rejected_repeat.status_code, 403)
+        self.assertIn("not your turn", rejected_repeat.get_json()["error"].lower())
+        self.assertEqual(room["next_speaker"], "interviewee")
+        self.assertEqual(len(room["messages"]), 2)
+
+        interviewee_message = interviewee.post(
+            "/api/rooms/ROOM01/messages",
+            json={"participant_id": interviewee_id, "text": "Answer 1."},
+        )
+        self.assertEqual(interviewee_message.status_code, 201)
+        self.assertEqual(interviewee_message.get_json()["message"]["role"], "interviewee")
+        self.assertEqual(room["next_speaker"], "interviewer")
+        self.assertEqual(len(room["messages"]), 3)
+        interviewer_poll = interviewer.get(f"/api/rooms/ROOM01/messages?participant_id={interviewer_id}").get_json()
+        interviewee_poll = interviewee.get(f"/api/rooms/ROOM01/messages?participant_id={interviewee_id}").get_json()
+        self.assertIs(interviewer_poll["can_send"], True)
+        self.assertIs(interviewee_poll["can_send"], False)
+
+        for client, pid in ((self.first, "first"), (self.second, "second")):
             messages_response = client.get(f"/api/rooms/ROOM01/messages?participant_id={pid}")
             self.assertEqual(messages_response.status_code, 200)
             visible_messages = messages_response.get_json()["messages"]
             self.assertEqual(visible_messages[0]["role"], "interviewee")
             self.assertEqual(set(visible_messages[0]), {"id", "participant_id", "role", "text"})
             self.assertNotIn("truth_status", str(visible_messages))
-            self.assertEqual(client.post("/api/rooms/ROOM01/typing", json={"participant_id": pid}).status_code, 200)
-        room = server.rooms["ROOM01"]
+            expected_typing_status = 200 if room["participants"][pid] == room["next_speaker"] else 403
+            self.assertEqual(
+                client.post("/api/rooms/ROOM01/typing", json={"participant_id": pid}).status_code,
+                expected_typing_status,
+            )
         interviewee_id = next(pid for pid, role in room["participants"].items() if role == "interviewee")
         submission_id = room["screening_submission_ids"][interviewee_id]
         submission = server.screening_submissions[submission_id]
@@ -135,7 +209,7 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(len(room["messages"]), 3)  # One claim plus each participant's message.
         self.assertEqual(room["messages"][0]["id"], 1)
         self.assertEqual(room["messages"][0]["participant_id"], interviewee_id)
-        self.assertEqual(room["messages"][0]["text"], f"I have visited {city_name}.")
+        self.assertEqual(room["messages"][0]["text"], f"I have visited {city_name} in the past three years.")
         self.assertEqual(room["current_claim"], {
             "city_id": city_id,
             "truth_status": submission["answers"][city_id]["visited"] == "yes",

@@ -314,6 +314,8 @@ def dialogue():
                 "city_id": next_city,
                 "truth_status": answer["visited"] == "yes",
             }
+            # After creating the opening claim, set the room's next speaker to "interviewer".
+            room["next_speaker"] = "interviewer"
             # Discard any typing pings sent before the opening claim was created.
             room["typing"].clear()
             # The current claim now reflects the interviewee's latest response.
@@ -537,7 +539,8 @@ def match_room(): # Handles the API request to match a participant to a room
             if code is None:
                 return jsonify(error="All rooms are currently occupied."), 409
             token = token_hex(32)
-            rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}, "ready": set(), "owners": {participant_id: token}, "current_claim": None}
+            # Add a room field for the next allowed speaker; initialize it to None until the claim exists.
+            rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}, "ready": set(), "owners": {participant_id: token}, "current_claim": None, "next_speaker": None}
             rooms[code]["screening_submission_ids"] = {participant_id: session["screening_submission_id"]} # Store the screening submission ID for the participant in the room; for creating a new room.
             session.update(room_code=code, room_participant_id=participant_id, room_token=token)
             return jsonify(code=code, status="waiting")
@@ -601,7 +604,10 @@ def send_room_message(code): # Handles sending a message to a specific room by a
         if room["current_claim"] is None:
             return jsonify(error="The opening claim must be available before messages can be sent."), 403
         role = room["participants"][participant_id]
-
+        # Reject this request unless role matches the room's next allowed speaker.
+        if role != room["next_speaker"]:
+            return jsonify(error="It is not your turn to speak."), 403
+    
         message = {
             "id": len(room["messages"]) + 1,
             "participant_id": participant_id,
@@ -610,6 +616,8 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }
         room["messages"].append(message)
+        # After accepting a message, switch the next allowed speaker to the other role.
+        room["next_speaker"] = "interviewer" if role == "interviewee" else "interviewee"
 
     return jsonify(message=_message_for_client(message)), 201 # Return the newly created message without its private timestamp
 
@@ -633,6 +641,9 @@ def set_typing(code):
             return jsonify(error="Both participants must be ready in your assigned room."), 403
         if room["current_claim"] is None:
             return jsonify(error="The opening claim must be available before typing."), 403
+        # Reject typing pings unless this participant's role is room["next_speaker"].
+        if room["next_speaker"] != room["participants"][participant_id]:
+            return jsonify(error="It's not your turn to type."), 403
 
         room["typing"][participant_id] = monotonic() # Update the timestamp of the participant's last typing activity
     return jsonify(status="ok") # Return a success status after setting the typing indicator
@@ -664,5 +675,8 @@ def get_room_messages(code):
             partner_id != participant_id and now - last < TYPING_WINDOW_SECONDS
             for partner_id, last in room["typing"].items()
         )
+        # Compute whether this session-bound participant's role matches room["next_speaker"].
+        can_send = room["next_speaker"] == room["participants"][participant_id]
 
-    return jsonify(messages=messages, partner_typing=partner_typing)
+    # Include that participant-only permission as "can_send" in this JSON response.
+    return jsonify(messages=messages, partner_typing=partner_typing, can_send=can_send)

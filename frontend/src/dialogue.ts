@@ -24,18 +24,22 @@ if (
 ) {
   window.location.replace("/room"); // Redirect to the room selection page if required session data is missing
 } else {
-  const activeRoomCode = roomCode!;
-  const activeParticipantId = participantId!;
-  roleName.textContent = role === "interviewer" ? "Interviewer" : "Interviewee";
-  let lastMessageId = 0;
-  let lastTypingPing = 0;
-  let openingClaimReceived = false;
-  const renderedMessageIds = new Set<number>();
+  const activeRoomCode = roomCode!; // Non-null assertion for the active chat room code
+  const activeParticipantId = participantId!; // Non-null assertion for the active participant ID
+  roleName.textContent = role === "interviewer" ? "Interviewer" : "Interviewee"; // Set the role name in the chat header based on the user's role
+  let lastMessageId = 0; // ID of the last message received from the server
+  let lastTypingPing = 0; // Timestamp of the last typing ping sent to the server
+  let openingClaimReceived = false; // Flag indicating whether the opening claim from the interviewee has been received
+  // Track the server's can_send value and use it to enable/disable both composer controls.
+  let canSend = false; // Flag indicating whether the server allows this participant to send messages
+  const renderedMessageIds = new Set<number>(); // Set of message IDs that have already been rendered to avoid duplicates
 
   function pingTyping(): void { // Sends a typing ping to the server to indicate that the participant is currently typing
-    if (!openingClaimReceived) return;
-    const now = Date.now();
-    if (now - lastTypingPing < 2000) return;
+    // Send typing pings only while the server says this participant may speak.
+    if (!canSend) return; // Do not send typing pings if the server does not allow this participant to send messages
+    if (!openingClaimReceived) return;  // Do not send typing pings until the opening claim has been received
+    const now = Date.now(); // Current timestamp in milliseconds
+    if (now - lastTypingPing < 2000) return; // Throttle typing pings to at most one every 2 seconds
     lastTypingPing = now; // Update the timestamp of the last typing ping
 
     void fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/typing`, {
@@ -53,8 +57,8 @@ if (
     role: string;
     text: string;
   }): void {
-    if (renderedMessageIds.has(message.id)) return;
-    renderedMessageIds.add(message.id);
+    if (renderedMessageIds.has(message.id)) return; // Skip rendering if this message has already been rendered
+    renderedMessageIds.add(message.id); // Mark this message ID as rendered to prevent duplicate rendering
     emptyState.remove(); // Remove the empty state message when a new message is rendered
 
     const bubble = document.createElement("p"); // Create a new paragraph element for the chat message
@@ -88,16 +92,19 @@ if (
           text: string;
         }>; // Array of new messages from the server
         partner_typing?: boolean;
+        can_send?: boolean;
         error?: string;
       };
       if (!response.ok) throw new Error(data.error ?? "Could not load messages."); // Throw an error if the response is not OK
-
+      canSend = data.can_send === true;  // Update the canSend flag based on the server's response
       typingIndicator.hidden = !data.partner_typing; // Show or hide the typing indicator based on the partner's typing status
 
       for (const message of data.messages ?? []) {
         lastMessageId = Math.max(lastMessageId, message.id);
         renderMessage(message); // Render the new message in the chat UI
       }
+      input.disabled = !canSend || !openingClaimReceived;
+      sendButton.disabled = !canSend || !openingClaimReceived;
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Could not load messages."); // Log any errors encountered during message polling
     } finally {
@@ -135,6 +142,7 @@ if (
           error?: string;
         };
         if (!response.ok || !data.message) throw new Error(data.error ?? "Could not send message."); // Throw an error if the message could not be sent
+        canSend = false; // The server has switched the turn; wait for polling to confirm the next permission
         renderMessage(data.message); // Render the newly sent message in the chat UI
       })
       .catch((error: unknown) => {
@@ -142,8 +150,9 @@ if (
         console.error(error instanceof Error ? error.message : "Could not send message."); // Log any errors encountered while sending the message
       })
       .finally(() => {
-        input.disabled = !openingClaimReceived;
-        sendButton.disabled = !openingClaimReceived;
+        // Keep the composer disabled after sending until polling says this participant's turn is active again.
+        input.disabled = !canSend || !openingClaimReceived;
+        sendButton.disabled = !canSend || !openingClaimReceived;
         if (openingClaimReceived) input.focus(); // Focus the input field after sending a message
       });
   }); // Handle the form submission for sending a new message
