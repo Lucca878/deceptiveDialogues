@@ -279,31 +279,6 @@ h1 {
   animation: matching-rotate 2.4s linear infinite;
 }
 
-.matching-steps {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 0.6rem 1rem;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  color: var(--muted);
-  font-size: 0.875rem;
-}
-
-.matching-steps li {
-  padding: 0.45rem 0.65rem;
-  border: 1px solid transparent;
-  border-radius: 0.5rem;
-}
-
-.matching-steps [aria-current="step"] {
-  border-color: var(--line);
-  background: var(--paper);
-  color: var(--ink);
-  font-weight: 600;
-}
-
 .matching-motion-toggle {
   min-height: 2.75rem;
   margin-top: 0.75rem;
@@ -330,13 +305,6 @@ h1 {
 
 @keyframes matching-rotate {
   to { transform: rotate(360deg); }
-}
-
-@media (max-width: 38rem) {
-  .matching-steps {
-    flex-direction: column;
-    align-items: center;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

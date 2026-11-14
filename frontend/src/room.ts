@@ -27,8 +27,6 @@ const roomStatus = getElement<HTMLParagraphElement>("#room-status"); // The para
 const matchingProgress = getElement<HTMLDivElement>("#matching-progress");
 const matchingRing = getElement<HTMLDivElement>("#matching-ring");
 const motionToggle = getElement<HTMLButtonElement>("#matching-motion-toggle");
-const findingStep = getElement<HTMLLIElement>("#matching-step-finding");
-const pairedStep = getElement<HTMLLIElement>("#matching-step-paired");
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 let matchingStage: "waiting" | "paired" | "error" = "waiting";
@@ -42,12 +40,6 @@ function updateMatchingDisplay(): void {
   motionToggle.disabled = reducedMotion.matches;
   motionToggle.setAttribute("aria-pressed", String(animationPaused));
   motionToggle.textContent = animationPaused ? "Resume animation" : "Pause animation";
-
-  findingStep.removeAttribute("aria-current");
-  pairedStep.removeAttribute("aria-current");
-  if (waiting) findingStep.setAttribute("aria-current", "step");
-  if (matchingStage === "paired") pairedStep.setAttribute("aria-current", "step");
-  // Detailed instructions remain upcoming until the browser navigates there.
 }
 
 motionToggle.addEventListener("click", () => {
@@ -109,7 +101,7 @@ async function checkRoomStatus(code: string): Promise<void> { // Checks the stat
 } // Checks the status of a specific room for the participant
 
 function waitForRoom(code: string): void { // Displays a waiting message and starts polling for room status
-  roomStatus.textContent = "Waiting for another participant. Please keep this page open.";
+  roomStatus.textContent = "Waiting to be paired with another participant...";
   void checkRoomStatus(code);
 }
 
@@ -120,7 +112,7 @@ async function findPartner(): Promise<void> { // Initiates the process of findin
   matchingProgress.hidden = false;
   roomStatus.hidden = false;
   retryButton.hidden = true; // Hides the retry button while searching for a partner
-  roomStatus.textContent = "Finding another participant…"; // Updates the room status message to indicate that the system is searching for a partner
+  roomStatus.textContent = "Waiting to be paired with another participant..."; // Sets the initial waiting message for the participant
 
   try {
     const response = await fetch("/api/rooms", {
