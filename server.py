@@ -282,8 +282,13 @@ def dialogue():
             submission = screening_submissions.get(submission_id)
             # Extract the order of cities from the submission, if available.
             order = submission.get("order") if submission else None
-            # Determine the next city the interviewee is supposed to discuss.
-            next_city = order[0] if order else None
+            # Select the claim using room["current_claim_index"] instead of always using order[0].
+            # Handle the index reaching the end of the shuffled order before trying to select another claim.
+            next_city = (
+                order[room["current_claim_index"]]
+                if order and room["current_claim_index"] < len(order)
+                else None
+            )
             # Retrieve the interviewee's answer for the next city.
             answer = submission["answers"].get(next_city) if submission and next_city else None
             # Look up the human-readable city name for the next city.
@@ -310,9 +315,11 @@ def dialogue():
             # Append the claim message to the room's message list.
             room["messages"].append(claim_message)
             # Keep correctness metadata server-side; client message projection omits it.
+            # Add a server-side dialogue ID/index for this claim, based on the interviewee's saved shuffled order.
             room["current_claim"] = {
                 "city_id": next_city,
                 "truth_status": answer["visited"] == "yes",
+                "dialogue_id": room["current_claim_index"]+1,
             }
             # Initialize the interviewer-question counter for this claim to zero. Store the count in this room's current_claim state, so it resets for each new claim.
             room["current_claim"]["interviewer_question_count"] = 0
@@ -321,7 +328,8 @@ def dialogue():
             # Discard any typing pings sent before the opening claim was created.
             room["typing"].clear()
             # The current claim now reflects the interviewee's latest response.
-        return render_template("dialogue.html")
+        # Pass this participant's server-derived role into the template so interviewer-only judgement controls are never sent to the interviewee.
+        return render_template("dialogue.html", role=room["participants"][participant_id])
 
 
 @app.get("/room")
@@ -542,7 +550,7 @@ def match_room(): # Handles the API request to match a participant to a room
                 return jsonify(error="All rooms are currently occupied."), 409
             token = token_hex(32)
             # Add a room field for the next allowed speaker; initialize it to None until the claim exists.
-            rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}, "ready": set(), "owners": {participant_id: token}, "current_claim": None, "next_speaker": None}
+            rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}, "ready": set(), "owners": {participant_id: token}, "current_claim": None, "current_claim_index": 0, "next_speaker": None}
             rooms[code]["screening_submission_ids"] = {participant_id: session["screening_submission_id"]} # Store the screening submission ID for the participant in the room; for creating a new room.
             session.update(room_code=code, room_participant_id=participant_id, room_token=token)
             return jsonify(code=code, status="waiting")
@@ -635,6 +643,43 @@ def send_room_message(code): # Handles sending a message to a specific room by a
 
     return jsonify(message=_message_for_client(message)), 201 # Return the newly created message without its private timestamp
 
+
+# POST endpoint for the interviewer to submit a true/false judgement and 0–100 confidence after all ten answers; derive the role and active dialogue ID from the bound room, then store the judgement on its current_claim.
+@app.post("/api/rooms/<code>/judgement") # Endpoint for the interviewer to submit a true/false judgement and confidence after all ten answers
+@consent_required
+@screening_required
+@instructions_required
+def submit_judgement(code):
+    data = request.get_json(silent=True) or {}
+    participant_id = _get_participant_id(data)
+    if participant_id is None:
+        return jsonify(error="A participant ID is required."), 400
+
+    with rooms_lock:
+        room, participant_id = _bound_room(code, participant_id)
+        if room is None or not _chat_ready(room):
+            return jsonify(error="Both participants must be ready in your assigned room."), 403
+        if room["current_claim"] is None:
+            return jsonify(error="The opening claim must be available before submitting a judgement."), 403
+        if room["participants"][participant_id] != "interviewer":
+            return jsonify(error="Only the interviewer can submit a judgement."), 403
+        if room["current_claim"].get("question_turns_ended") is not True:
+            return jsonify(error="All ten questions must be asked before submitting a judgement."), 403
+
+        judgement = data.get("judgement")
+        confidence = data.get("confidence")
+        if judgement not in ["true", "false"]:
+            return jsonify(error="Judgement must be true or false."), 400
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not (0 <= confidence <= 100):
+            return jsonify(error="Confidence must be a number between 0 and 100."), 400
+
+        room["current_claim"]["judgement"] = {
+            "judgement": judgement,
+            "confidence": confidence,
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        }
+
+    return jsonify(status="ok"), 201
 
 TYPING_WINDOW_SECONDS = 3.0
 

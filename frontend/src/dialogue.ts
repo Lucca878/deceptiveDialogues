@@ -18,6 +18,7 @@ const questionCounter = getElement<HTMLParagraphElement>("#question-counter"); /
 const questionProgressNote = getElement<HTMLSpanElement>("#question-progress-note"); // Supporting question progress status
 const questionProgressTrack = getElement<HTMLDivElement>("#question-progress-track"); // Accessible progress bar
 const questionProgressFill = getElement<HTMLSpanElement>("#question-progress-fill"); // Visual progress bar fill
+const judgementForm = getElement<HTMLFormElement>("#judgement-form"); // Judgement form element (interviewer only)
 
 const role = sessionStorage.getItem("chat-role"); // User's role in the chat (interviewer or interviewee)
 const roomCode = sessionStorage.getItem("chat-room-code"); // Active chat room code
@@ -108,6 +109,9 @@ if (
         questionProgressTrack.setAttribute("aria-valuenow", String(questionNumber));
         questionProgressFill.style.width = `${questionNumber * 10}%`;
         if (data.question_turns_ended) {
+          if (judgementForm) {
+            judgementForm.hidden = false;
+          }
           questionCounter.textContent = "Questions complete";
           questionProgressNote.textContent = "Please wait for the next step.";
           questionProgressTrack.setAttribute("aria-label", "All 10 questions completed");
@@ -135,6 +139,9 @@ if (
   void pollMessages(); // Start polling for new messages immediately
 
   input.addEventListener("input", pingTyping);
+
+  // TODO 1: Add a submit handler for the optional judgement form; prevent native navigation and POST its truth/confidence values as JSON to the judgement endpoint.
+  
 
   form.addEventListener("submit", (event) => {
     event.preventDefault(); // Prevent the default form submission behavior

@@ -27,6 +27,26 @@
         <p class="chat-empty" id="chat-empty">Send a message to begin.</p>
       </div>
 
+      {% if role == 'interviewer' %}
+      <form class="judgement-form" id="judgement-form" hidden>
+        <fieldset>
+          <legend>Judgement</legend>
+          <label>
+            <input type="radio" name="truth" value="true" required>
+            True
+          </label>
+          <label>
+            <input type="radio" name="truth" value="false" required>
+            False
+          </label>
+          <label>
+            Confidence (0–100%):
+            <input type="number" name="confidence" min="0" max="100" required>
+          </label>
+          <button type="submit">Submit</button>
+        </fieldset>
+      </form>
+      {% endif %}
       <p class="chat-typing" id="chat-typing" hidden>
         <span class="visually-hidden">The other participant is typing.</span>
         <span class="chat-typing-dot" aria-hidden="true"></span>
