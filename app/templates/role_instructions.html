@@ -11,6 +11,7 @@
     <section class="travel-card role-instructions-card" aria-labelledby="role-instructions-title" id="role-instructions" data-room-code="{{ code }}" data-ready="{{ 'true' if ready else 'false' }}">
       <h1 id="role-instructions-title">Your instructions</h1>
       {% if ready %}
+      <div class="matching-ring matching-ring--animated" aria-hidden="true"></div>
       <p class="travel-lead" id="readiness-status" role="status" aria-live="polite">Waiting for your partner. Please keep this page open.</p>
       {% else %}
       {% if role == 'interviewer' %}
