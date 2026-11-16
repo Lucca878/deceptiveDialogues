@@ -46,6 +46,9 @@
           <button type="submit">Submit</button>
         </fieldset>
       </form>
+      <!-- A hidden, accessible status message here for correctness feedback shown only to the interviewer. -->
+      <p class="judgement-status" id="judgement-status" hidden aria-live="polite"></p>
+      <button class="judgement-continue" id="judgement-continue" hidden>Continue</button>
       {% endif %}
       <p class="chat-typing" id="chat-typing" hidden>
         <span class="visually-hidden">The other participant is typing.</span>

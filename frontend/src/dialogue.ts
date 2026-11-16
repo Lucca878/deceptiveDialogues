@@ -18,9 +18,18 @@ const questionCounter = getElement<HTMLParagraphElement>("#question-counter"); /
 const questionProgressNote = getElement<HTMLSpanElement>("#question-progress-note"); // Supporting question progress status
 const questionProgressTrack = getElement<HTMLDivElement>("#question-progress-track"); // Accessible progress bar
 const questionProgressFill = getElement<HTMLSpanElement>("#question-progress-fill"); // Visual progress bar fill
-const judgementForm = getElement<HTMLFormElement>("#judgement-form"); // Judgement form element (interviewer only)
-
 const role = sessionStorage.getItem("chat-role"); // User's role in the chat (interviewer or interviewee)
+const judgementForm = 
+  role === "interviewer"
+  ? document.querySelector<HTMLFormElement>("#judgement-form") // Judgement form element (interviewer only)
+  : null;
+const judgementStatus = 
+  role === "interviewer"
+  ? getElement<HTMLParagraphElement>("#judgement-status") // Judgement status element (interviewer only)
+  : null;
+const continueButton = role === "interviewer"
+  ? document.querySelector<HTMLButtonElement>("#judgement-continue")
+  : null; // Only the interviewer page contains the Continue button.
 const roomCode = sessionStorage.getItem("chat-room-code"); // Active chat room code
 const participantId = sessionStorage.getItem("participant-id"); // Unique identifier for the participant
 if (
@@ -99,9 +108,14 @@ if (
         can_send?: boolean;
         question_number?: number;
         question_turns_ended?: boolean;
+        dialogue_complete?: boolean;
         error?: string;
       };
       if (!response.ok) throw new Error(data.error ?? "Could not load messages."); // Throw an error if the response is not OK
+      if (data.dialogue_complete === true) {
+        window.location.replace("/feedback"); // Open the guarded feedback URL when the server reports completion.
+        return;
+      }
       canSend = data.can_send === true;  // Update the canSend flag based on the server's response
       if (Number.isInteger(data.question_number) && data.question_number! >= 1 && data.question_number! <= 10) {
         const questionNumber = data.question_number!;
@@ -140,9 +154,63 @@ if (
 
   input.addEventListener("input", pingTyping);
 
-  // TODO 1: Add a submit handler for the optional judgement form; prevent native navigation and POST its truth/confidence values as JSON to the judgement endpoint.
-  
+  // Add a submit handler for the optional judgement form; prevent native navigation and POST its truth/confidence values as JSON to the judgement endpoint.
+  async function submitJudgement(event: Event) {
+    event.preventDefault(); // Prevent the default form submission behavior
+    if (judgementForm) { // Check if the judgement form exists
+      const formData = new FormData(judgementForm);
+      const truth = formData.get("truth");
+      const confidence = formData.get("confidence");
+      if (!truth || !confidence) return;
+      try {
+        const response = await fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/judgement`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ participant_id: activeParticipantId, judgement: truth, confidence: Number(confidence) }),
+        });
+        if (!response.ok) throw new Error("Could not submit judgement.");
+        const result = await response.json() as { correct?: boolean };
+        if (judgementStatus) {
+          if (typeof result.correct === "boolean") {
+            judgementStatus.textContent = result.correct ? "Correct" : "Incorrect";
+            judgementStatus.hidden = false;
+            if (continueButton) {
+              continueButton.hidden = false;
+            }
+          } else {
+            judgementStatus.textContent = "";
+            judgementStatus.hidden = true;
+          }
+        }
+      } catch (error) {
+        console.error(error instanceof Error ? error.message : "Could not submit judgement.");
+      }
+    }
+  }
+  if (judgementForm) {
+    judgementForm.addEventListener("submit", submitJudgement);
+  }
 
+  async function continueToNextClaim() {
+    if (!continueButton) return;
+    continueButton.disabled = true; // Prevent duplicate Continue requests while this one is processing.
+    try {
+      const response = await fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/continue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ participant_id: activeParticipantId }),
+      }); // Ask the server to advance the room after this judgement.
+      if (!response.ok) throw new Error("Could not continue to the next claim.");
+      window.location.assign("/dialogue"); // Reload dialogue so the server creates the next claim.
+    } catch (error) {
+      continueButton.disabled = false; // Allow a retry if the server could not advance the room.
+      console.error(error instanceof Error ? error.message : "Could not continue to the next claim.");
+    }
+  }
+  if (continueButton) {
+    continueButton.addEventListener("click", continueToNextClaim);
+  }
+  
   form.addEventListener("submit", (event) => {
     event.preventDefault(); // Prevent the default form submission behavior
 

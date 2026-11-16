@@ -53,6 +53,38 @@ class RoleReadinessTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 403)
                 self.assertIn("error", response.get_json())
 
+    def test_final_continue_routes_both_participants_to_feedback(self):
+        self.pair()
+        room = server.rooms["ROOM01"]
+        room["ready"].update(room["participants"])
+        clients = {"first": self.first, "second": self.second}
+        interviewer_id = next(pid for pid, role in room["participants"].items() if role == "interviewer")
+        interviewee_id = next(pid for pid, role in room["participants"].items() if role == "interviewee")
+        for client in clients.values():
+            self.assertEqual(client.get("/dialogue").status_code, 200)
+        self.assertEqual(self.first.get("/feedback").location, "/dialogue")
+        room["current_claim_index"] = 9
+        room["current_claim"]["dialogue_id"] = 10
+        room["current_claim"]["question_turns_ended"] = True
+        room["current_claim"]["judgement"] = {"judgement": "true", "confidence": 80}
+
+        continued = clients[interviewer_id].post(
+            "/api/rooms/ROOM01/continue",
+            json={"participant_id": interviewer_id},
+        )
+
+        self.assertEqual(continued.status_code, 201)
+        self.assertEqual(room["current_claim_index"], 10)
+        self.assertIsNone(room["current_claim"])
+        for participant_id, client in clients.items():
+            with self.subTest(participant_id=participant_id):
+                poll = client.get(f"/api/rooms/ROOM01/messages?participant_id={participant_id}")
+                self.assertTrue(poll.get_json()["dialogue_complete"])
+                self.assertEqual(client.get("/dialogue").location, "/feedback")
+                feedback = client.get("/feedback")
+                self.assertEqual(feedback.status_code, 200)
+                self.assertIn(b"Thank you for completing all the dialogues.", feedback.data)
+
     def test_full_lifecycle_private_instructions_and_both_ready(self):
         self.assertEqual(self.first.get("/dialogue").location, "/room")
         self.assertEqual(self.first.get("/role-instructions").location, "/room")
@@ -263,6 +295,7 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(room["current_claim"], {
             "city_id": city_id,
             "truth_status": submission["answers"][city_id]["visited"] == "yes",
+            "dialogue_id": 1,  # The first shuffled claim is recorded as dialogue one.
             "interviewer_question_count": 10,
             "question_turns_ended": True,
         })

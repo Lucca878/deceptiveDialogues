@@ -253,6 +253,23 @@ def _chat_ready(room):
     )
 
 
+def _dialogue_complete(room):
+    """Called under rooms_lock; report completion without exposing the claim order."""
+    if room["current_claim"] is not None:
+        return False
+    interviewee_id = next(
+        (pid for pid, role in room["participants"].items() if role == "interviewee"),
+        None,
+    )
+    submission = screening_submissions.get(room["screening_submission_ids"].get(interviewee_id))
+    order = submission.get("order") if submission else None
+    return (
+        isinstance(order, list)
+        and len(order) == 10
+        and room["current_claim_index"] >= len(order)
+    )
+
+
 @app.get("/")
 def landing():
     return render_template("landing.html")
@@ -269,6 +286,8 @@ def dialogue():
             return redirect(url_for("room"))
         if not _chat_ready(room):
             return redirect(url_for("role_instructions"))
+        if _dialogue_complete(room):
+            return redirect(url_for("feedback"))
         # If there is no current claim, generate one based on the interviewee's next city and screening answers.
         if room["current_claim"] is None:
             # Identify the interviewee and retrieve their next city and corresponding screening answer.
@@ -282,8 +301,10 @@ def dialogue():
             submission = screening_submissions.get(submission_id)
             # Extract the order of cities from the submission, if available.
             order = submission.get("order") if submission else None
-            # Select the claim using room["current_claim_index"] instead of always using order[0].
-            # Handle the index reaching the end of the shuffled order before trying to select another claim.
+            # Reject missing or malformed saved claim orders before checking their length or indexing them.
+            if not isinstance(order, list) or len(order) != 10:
+                return "The dialogue claims could not be loaded. Please contact the researcher.", 409
+            # Select the claim using the room's zero-based index into the saved shuffled order.
             next_city = (
                 order[room["current_claim_index"]]
                 if order and room["current_claim_index"] < len(order)
@@ -330,6 +351,24 @@ def dialogue():
             # The current claim now reflects the interviewee's latest response.
         # Pass this participant's server-derived role into the template so interviewer-only judgement controls are never sent to the interviewee.
         return render_template("dialogue.html", role=room["participants"][participant_id])
+
+
+@app.get("/feedback")
+@consent_required
+@screening_required
+@instructions_required
+def feedback():
+    with rooms_lock:
+        room, participant_id = _bound_room(session.get("room_code", ""))
+        if room is None or room["participants"][participant_id] is None:
+            return redirect(url_for("room"))
+        if not _chat_ready(room):
+            return redirect(url_for("role_instructions"))
+        if not _dialogue_complete(room):
+            return redirect(url_for("dialogue"))
+        response = app.make_response(render_template("feedback.html"))
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
 
 @app.get("/room")
@@ -676,9 +715,38 @@ def submit_judgement(code):
         room["current_claim"]["judgement"] = {
             "judgement": judgement,
             "confidence": confidence,
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }
+        # Compare the submitted judgement with the server-only truth_status and return correctness to this interviewer-authorized request.
+        truth_status = room["current_claim"].get("truth_status")
+        correct = ((judgement == "true") == truth_status)
+    return jsonify(status="ok", correct=correct), 201
+    
 
+# TODO 1: Add a POST continue endpoint that accepts only the bound interviewer after a judgement, advances the claim index, and preserves earlier dialogue messages.
+@app.post("/api/rooms/<code>/continue") # Advances the claim index after a judgement; only the bound interviewer can perform this action
+@consent_required
+@screening_required
+@instructions_required
+def continue_claim(code):
+    data = request.get_json(silent=True) or {}
+    participant_id = _get_participant_id(data)
+    if participant_id is None:
+        return jsonify(error="A participant ID is required."), 400
+
+    with rooms_lock:
+        room, participant_id = _bound_room(code, participant_id)
+        if room is None or not _chat_ready(room):
+            return jsonify(error="Both participants must be ready in your assigned room."), 403
+        if room["current_claim"] is None:
+            return jsonify(error="The opening claim must be available before continuing."), 403
+        if room["participants"][participant_id] != "interviewer":
+            return jsonify(error="Only the interviewer can continue to the next claim."), 403
+        if room["current_claim"].get("judgement") is None:
+            return jsonify(error="A judgement must be submitted before continuing."), 403
+
+        room["current_claim_index"] += 1 # Advance to the next claim in the room's claim list
+        room["current_claim"] = None # Clear the current claim to prepare for the next one
     return jsonify(status="ok"), 201
 
 TYPING_WINDOW_SECONDS = 3.0
@@ -743,6 +811,8 @@ def get_room_messages(code):
             question_number = max(question_count, 1)
         else:
             question_number = min(question_count + 1, 10)
+        # Report only the completion boolean, never the private shuffled claim order.
+        dialogue_complete = _dialogue_complete(room)
         # This response is bound to the requester; it exposes no city answer or claim truth.
         can_send = room["next_speaker"] == room["participants"][participant_id]
 
@@ -752,4 +822,5 @@ def get_room_messages(code):
         can_send=can_send,
         question_number=question_number,
         question_turns_ended=question_turns_ended,
+        dialogue_complete=dialogue_complete,
     )

@@ -382,7 +382,7 @@ class TravelScreeningTests(unittest.TestCase):
         self.assertEqual(set(sent.get_json()["message"]), {"id", "participant_id", "role", "text"})
         for client, pid in ((first, "first"), (second, "second")):
             received = client.get(f"/api/rooms/ROOM01/messages?participant_id={pid}").get_json()
-            self.assertEqual(set(received), {"messages", "partner_typing", "can_send", "question_number", "question_turns_ended"})
+            self.assertEqual(set(received), {"messages", "partner_typing", "can_send", "question_number", "question_turns_ended", "dialogue_complete"})
             self.assertEqual(len(received["messages"]), 2)
             self.assertEqual(received["messages"][0]["role"], "interviewee")
             self.assertEqual(received["messages"][1], sent.get_json()["message"])
