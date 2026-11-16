@@ -218,7 +218,8 @@ class RoleReadinessTests(unittest.TestCase):
             if status["role"] == "interviewee":
                 self.assertIn(b'id="transition-maze"', dialogue_response.data)
                 self.assertIn(b'class="maze-controls"', dialogue_response.data)
-                self.assertIn(b"Exit: row 7, column 7.", dialogue_response.data)
+                self.assertIn(b'aria-label="9 by 9 maze board"', dialogue_response.data)
+                self.assertIn(b"Exit: row 9, column 9.", dialogue_response.data)
                 self.assertNotIn(b'id="judgement-form"', dialogue_response.data)
             else:
                 self.assertNotIn(b'id="transition-maze"', dialogue_response.data)

@@ -304,6 +304,7 @@ h1 {
 }
 
 .matching-ring {
+  flex: 0 0 3rem;
   width: 3rem;
   height: 3rem;
   margin: 0 auto 1.5rem;
@@ -1000,7 +1001,8 @@ h1 {
 }
 
 #transition-ring {
-  margin-block: 0.5rem;
+  /* Keep the ring at its intended size and separate it from the message and maze. */
+  margin-block: 1rem;
 }
 
 .transition-maze {
@@ -1031,7 +1033,7 @@ h1 {
 
 .maze-board {
   display: grid;
-  grid-template-columns: repeat(7, clamp(1.75rem, 8vw, 2.4rem));
+  grid-template-columns: repeat(9, clamp(1.35rem, 6vw, 2rem));
   width: max-content;
   border: 2px solid var(--line);
   outline: none;
@@ -1416,6 +1418,9 @@ h1 {
 }
 
 .judgement-status {
+  display: flex;
+  align-items: center;
+  min-height: 3.6rem;
   margin: 0;
   padding: 0.75rem 1rem;
   border: 1px solid var(--line);
@@ -1430,7 +1435,7 @@ h1 {
 .judgement-feedback {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  align-items: stretch;
   gap: 0.75rem;
   width: 100%;
 }
@@ -1450,6 +1455,8 @@ h1 {
 }
 
 .judgement-continue {
+  align-self: stretch;
+  min-height: 3.6rem;
   justify-self: end;
 }
 

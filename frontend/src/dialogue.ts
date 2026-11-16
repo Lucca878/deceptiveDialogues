@@ -77,8 +77,8 @@ if (
   // Track the server's can_send value and use it to enable/disable both composer controls.
   let canSend = false; // Flag indicating whether the server allows this participant to send messages
   const renderedMessageIds = new Set<number>(); // Set of message IDs that have already been rendered to avoid duplicates
-  const mazeSize = 7; // Use a larger optional client-only maze so its route takes more exploration.
-  const minimumMazePathLength = 16; // Reject layouts with a short, obvious route to the exit.
+  const mazeSize = 9; // Increase the optional client-only maze to make routes less predictable.
+  const minimumMazePathLength = 24; // Reject layouts with a short, obvious route to the exit.
   let mazeLayout: number[][] = []; // Store only the current maze locally; never send maze state to the server.
   let previousMazeKey = ""; // Avoid immediately showing the same generated layout twice.
   let mazePosition = { row: 0, column: 0 }; // Start at the upper-left cell.
@@ -110,7 +110,7 @@ if (
   }
 
   function createMaze(): number[][] {
-    for (let attempt = 0; attempt < 1000; attempt += 1) { // Allow enough random tries to find a genuinely longer route.
+    for (let attempt = 0; attempt < 5000; attempt += 1) { // Longest-route layouts are rare, so retry before using the guaranteed fallback.
       const candidate = Array.from({ length: mazeSize }, () =>
         Array.from({ length: mazeSize }, () => Math.random() < 0.34 ? 1 : 0),
       ); // Increase wall density to create more branches and dead ends.
@@ -409,7 +409,9 @@ if (
         const result = await response.json() as { correct?: boolean };
         if (judgementStatus) {
           if (typeof result.correct === "boolean") {
-            judgementStatus.textContent = result.correct ? "Correct" : "Incorrect";
+            judgementStatus.textContent = result.correct
+              ? "Your judgement was correct"
+              : "Your judgement was incorrect";
             judgementStatus.classList.toggle("judgement-status--correct", result.correct);
             judgementStatus.classList.toggle("judgement-status--incorrect", !result.correct);
             judgementStatus.hidden = false;

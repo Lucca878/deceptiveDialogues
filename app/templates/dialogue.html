@@ -51,15 +51,15 @@
         <!-- This optional client-only activity is only presented to the interviewee and never gates progression. -->
         <section class="transition-maze" id="transition-maze" aria-labelledby="maze-title">
           <h2 id="maze-title">Optional maze</h2>
-          <p id="maze-instructions">You can explore this small maze while you wait. Use the arrow keys or direction buttons. You may stop at any time. Once the interviewer is ready, the next dialogue will begin automatically</p>
-          <div class="maze-board" id="maze-board" tabindex="0" aria-label="Small maze board" aria-describedby="maze-instructions maze-status"></div>
+          <p id="maze-instructions">You can explore this maze while you wait. Use the arrow keys or direction buttons. You may stop at any time. Once the interviewer is ready, the next dialogue will begin automatically.</p>
+          <div class="maze-board" id="maze-board" tabindex="0" aria-label="9 by 9 maze board" aria-describedby="maze-instructions maze-status"></div>
           <div class="maze-controls" role="group" aria-label="Maze direction controls">
             <button class="maze-control" type="button" data-maze-direction="up">Up</button>
             <button class="maze-control" type="button" data-maze-direction="left">Left</button>
             <button class="maze-control" type="button" data-maze-direction="down">Down</button>
             <button class="maze-control" type="button" data-maze-direction="right">Right</button>
           </div>
-          <p class="visually-hidden" id="maze-status" role="status" aria-live="polite">Maze start: row 1, column 1. Exit: row 7, column 7.</p>
+          <p class="visually-hidden" id="maze-status" role="status" aria-live="polite">Maze start: row 1, column 1. Exit: row 9, column 9.</p>
         </section>
         {% endif %}
       </div>
