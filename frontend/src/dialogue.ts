@@ -32,6 +32,9 @@ const judgementStatus =
 const continueButton = role === "interviewer"
   ? document.querySelector<HTMLButtonElement>("#judgement-continue")
   : null; // Only the interviewer page contains the Continue button.
+const judgementFields = role === "interviewer"
+  ? document.querySelector<HTMLFieldSetElement>("#judgement-fields")
+  : null; // Fieldset containing the interviewer judgement controls.
 const mazeBoard = role === "interviewee"
   ? document.querySelector<HTMLDivElement>("#maze-board")
   : null; // The optional maze is rendered only for the interviewee.
@@ -59,15 +62,60 @@ if (
   // Track the server's can_send value and use it to enable/disable both composer controls.
   let canSend = false; // Flag indicating whether the server allows this participant to send messages
   const renderedMessageIds = new Set<number>(); // Set of message IDs that have already been rendered to avoid duplicates
-  const mazeLayout = [ // Fixed, client-only maze layout; walls are 1 and walkable cells are 0.
-    [0, 0, 1, 0, 0],
-    [1, 0, 1, 0, 1],
-    [0, 0, 0, 0, 0],
-    [0, 1, 1, 1, 0],
-    [0, 0, 0, 0, 0],
-  ];
+  const mazeSize = 5; // Keep each optional client-only maze compact on phones and laptops.
+  let mazeLayout: number[][] = []; // Store only the current maze locally; never send maze state to the server.
+  let previousMazeKey = ""; // Avoid immediately showing the same generated layout twice.
   let mazePosition = { row: 0, column: 0 }; // Start at the upper-left cell.
   type MazeDirection = "up" | "down" | "left" | "right";
+
+  function mazeHasPath(layout: number[][]): boolean {
+    const queue: Array<[number, number]> = [[0, 0]]; // Breadth-first search rejects generated layouts without a route to the exit.
+    const visited = new Set(["0,0"]);
+    const steps: Array<[number, number]> = [[-1, 0], [1, 0], [0, -1], [0, 1]];
+    while (queue.length > 0) {
+      const [row, column] = queue.shift()!;
+      if (row === mazeSize - 1 && column === mazeSize - 1) return true;
+      for (const [rowStep, columnStep] of steps) {
+        const nextRow = row + rowStep;
+        const nextColumn = column + columnStep;
+        const key = `${nextRow},${nextColumn}`;
+        if (
+          nextRow >= 0 && nextRow < mazeSize &&
+          nextColumn >= 0 && nextColumn < mazeSize &&
+          layout[nextRow][nextColumn] === 0 &&
+          !visited.has(key)
+        ) {
+          visited.add(key);
+          queue.push([nextRow, nextColumn]);
+        }
+      }
+    }
+    return false;
+  }
+
+  function createMaze(): number[][] {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const candidate = Array.from({ length: mazeSize }, () =>
+        Array.from({ length: mazeSize }, () => Math.random() < 0.28 ? 1 : 0),
+      ); // Randomly place walls in a fresh client-only grid.
+      candidate[0][0] = 0; // Keep the start open.
+      candidate[mazeSize - 1][mazeSize - 1] = 0; // Keep the exit open.
+      const key = candidate.map((row) => row.join("")).join("/");
+      if (key !== previousMazeKey && mazeHasPath(candidate)) {
+        previousMazeKey = key;
+        return candidate;
+      }
+    }
+    previousMazeKey = "open-fallback"; // Fall back to an always-solvable open grid if random attempts fail.
+    return Array.from({ length: mazeSize }, () => Array.from({ length: mazeSize }, () => 0));
+  }
+
+  function startFreshMaze(statusText: string): void {
+    mazeLayout = createMaze();
+    mazePosition = { row: 0, column: 0 };
+    renderMaze();
+    if (mazeStatus) mazeStatus.textContent = statusText;
+  }
 
   function renderMaze(): void {
     if (!mazeBoard) return;
@@ -113,15 +161,16 @@ if (
     mazePosition = { row: nextRow, column: nextColumn };
     renderMaze();
     if (nextRow === mazeLayout.length - 1 && nextColumn === mazeLayout[nextRow].length - 1) {
-      mazeStatus.textContent = "Maze complete. You can keep waiting; the next dialogue will begin automatically.";
+      startFreshMaze("Maze complete. A new maze is ready if you'd like to keep exploring.");
       return;
     }
     mazeStatus.textContent = `You are at row ${nextRow + 1}, column ${nextColumn + 1}.`;
   }
 
   if (mazeBoard && mazeStatus) {
-    renderMaze();
-    mazeBoard.addEventListener("keydown", (event: KeyboardEvent) => {
+    startFreshMaze("Maze start: row 1, column 1. Exit: row 5, column 5.");
+    transitionPanel.addEventListener("keydown", (event: KeyboardEvent) => {
+      if (transitionPanel.hidden) return;
       const directionByKey: Record<string, MazeDirection> = {
         ArrowUp: "up",
         ArrowDown: "down",
@@ -219,6 +268,7 @@ if (
       if (countdownActive && typeof data.seconds_remaining === "number") {
         const secondsRemaining = Math.ceil(data.seconds_remaining);
         transitionCountdown.textContent = String(secondsRemaining);
+        form.hidden = true;
         if (judgementForm) judgementForm.hidden = true;
         if (continueButton) continueButton.hidden = true;
       }
@@ -237,8 +287,9 @@ if (
         questionProgressTrack.setAttribute("aria-valuenow", String(questionNumber));
         questionProgressFill.style.width = `${questionNumber * 10}%`;
         if (data.question_turns_ended) {
+          form.hidden = true; // Replace the chat composer with the interviewer judgement or interviewee waiting panel.
           if (judgementForm) {
-            judgementForm.hidden = false;
+            judgementForm.hidden = countdownActive;
           }
           questionCounter.textContent = "Questions complete";
           questionProgressNote.textContent = "Please wait for the next step.";
@@ -268,14 +319,22 @@ if (
 
   input.addEventListener("input", pingTyping);
 
+  const confidenceInput = document.getElementById("judgement-confidence") as HTMLInputElement | null;
+  const confidenceOutput = document.getElementById("confidence-output") as HTMLOutputElement | null;
+  if (confidenceInput && confidenceOutput) {
+    confidenceInput.addEventListener("input", () => {
+      confidenceOutput.value = confidenceInput.value;
+    });
+  }
   // Add a submit handler for the optional judgement form; prevent native navigation and POST its truth/confidence values as JSON to the judgement endpoint.
   async function submitJudgement(event: Event) {
     event.preventDefault(); // Prevent the default form submission behavior
-    if (judgementForm) { // Check if the judgement form exists
+    if (judgementForm && judgementFields) { // Only the interviewer page has judgement controls.
       const formData = new FormData(judgementForm);
       const truth = formData.get("truth");
       const confidence = formData.get("confidence");
       if (!truth || !confidence) return;
+      judgementFields.disabled = true; // Prevent duplicate submissions while waiting for the server.
       try {
         const response = await fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/judgement`, {
           method: "POST",
@@ -287,7 +346,10 @@ if (
         if (judgementStatus) {
           if (typeof result.correct === "boolean") {
             judgementStatus.textContent = result.correct ? "Correct" : "Incorrect";
+            judgementStatus.classList.toggle("judgement-status--correct", result.correct);
+            judgementStatus.classList.toggle("judgement-status--incorrect", !result.correct);
             judgementStatus.hidden = false;
+            judgementFields.hidden = true; // Show feedback in place of the submitted judgement controls.
             if (continueButton) {
               continueButton.hidden = false;
             }
@@ -297,6 +359,7 @@ if (
           }
         }
       } catch (error) {
+        judgementFields.disabled = false; // Let the interviewer retry when the request fails.
         console.error(error instanceof Error ? error.message : "Could not submit judgement.");
       }
     }

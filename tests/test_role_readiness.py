@@ -203,8 +203,11 @@ class RoleReadinessTests(unittest.TestCase):
             if status["role"] == "interviewee":
                 self.assertIn(b'id="transition-maze"', dialogue_response.data)
                 self.assertIn(b'class="maze-controls"', dialogue_response.data)
+                self.assertNotIn(b'id="judgement-form"', dialogue_response.data)
             else:
                 self.assertNotIn(b'id="transition-maze"', dialogue_response.data)
+                self.assertIn(b'class="chat-composer judgement-form"', dialogue_response.data)
+                self.assertIn(b'id="judgement-status"', dialogue_response.data)
             clients_by_role[status["role"]] = (client, pid)
 
         interviewer, interviewer_id = clients_by_role["interviewer"]
