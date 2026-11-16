@@ -225,9 +225,9 @@ class RoleReadinessTests(unittest.TestCase):
                 self.assertNotIn(b'id="transition-maze"', dialogue_response.data)
                 self.assertIn(b'class="chat-composer judgement-form"', dialogue_response.data)
                 self.assertIn(b'id="judgement-truth-step"', dialogue_response.data)
-                self.assertIn(b'id="judgement-truth-submit" type="button">Submit', dialogue_response.data)
+                self.assertIn(b'id="judgement-truth-submit" type="button" disabled>Submit', dialogue_response.data)
                 self.assertIn(b'id="judgement-confidence-step" hidden', dialogue_response.data)
-                self.assertIn(b'aria-label="Submit confidence rating">Submit', dialogue_response.data)
+                self.assertIn(b'id="judgement-confidence-submit" type="submit" aria-label="Submit confidence rating" disabled>Submit', dialogue_response.data)
                 self.assertIn(b'id="judgement-status"', dialogue_response.data)
             clients_by_role[status["role"]] = (client, pid)
 

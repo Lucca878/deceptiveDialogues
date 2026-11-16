@@ -50,6 +50,9 @@ const judgementConfidenceStep = role === "interviewer"
 const judgementTruthSubmit = role === "interviewer"
   ? document.querySelector<HTMLButtonElement>("#judgement-truth-submit")
   : null; // Advances from the truth choice to confidence without submitting partial data.
+const judgementConfidenceSubmit = role === "interviewer"
+  ? document.querySelector<HTMLButtonElement>("#judgement-confidence-submit")
+  : null; // Submits confidence only after the slider has been interacted with.
 const mazeBoard = role === "interviewee"
   ? document.querySelector<HTMLDivElement>("#maze-board")
   : null; // The optional maze is rendered only for the interviewee.
@@ -368,11 +371,32 @@ if (
 
   const confidenceInput = document.getElementById("judgement-confidence") as HTMLInputElement | null;
   const confidenceOutput = document.getElementById("confidence-output") as HTMLOutputElement | null;
+  let confidenceSliderTouched = false; // Require an explicit slider interaction even when its initial value is valid.
   if (confidenceInput && confidenceOutput) {
     confidenceInput.addEventListener("input", () => {
       confidenceOutput.value = confidenceInput.value;
+      confidenceSliderTouched = true;
+      if (judgementConfidenceSubmit) judgementConfidenceSubmit.disabled = false;
+    });
+    // Pointer/touch interaction counts even when the participant selects the slider's existing value.
+    confidenceInput.addEventListener("pointerdown", () => {
+      confidenceSliderTouched = true;
+      if (judgementConfidenceSubmit) judgementConfidenceSubmit.disabled = false;
+    });
+    // Allow keyboard users to unlock Submit by operating the range control too.
+    confidenceInput.addEventListener("keydown", (event: KeyboardEvent) => {
+      if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
+        confidenceSliderTouched = true;
+        if (judgementConfidenceSubmit) judgementConfidenceSubmit.disabled = false;
+      }
     });
   }
+  // Enable truth submission only after one of the required radio choices is selected.
+  judgementForm?.querySelectorAll<HTMLInputElement>('input[name="truth"]').forEach((choice) => {
+    choice.addEventListener("change", () => {
+      if (judgementTruthSubmit) judgementTruthSubmit.disabled = false;
+    });
+  });
   // Show the confidence step only after a truth choice has been made.
   function advanceToConfidence(): void {
     if (!judgementForm || !judgementTruthStep || !judgementConfidenceStep) return;
@@ -397,7 +421,7 @@ if (
       const formData = new FormData(judgementForm);
       const truth = formData.get("truth");
       const confidence = formData.get("confidence");
-      if (!truth || !confidence) return;
+      if (!truth || !confidence || !confidenceSliderTouched) return;
       judgementFields.disabled = true; // Prevent duplicate submissions while waiting for the server.
       try {
         const response = await fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/judgement`, {

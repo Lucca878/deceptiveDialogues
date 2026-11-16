@@ -93,7 +93,7 @@
                   <span>False</span>
                 </label>
               </div>
-              <button class="button chat-send" id="judgement-truth-submit" type="button">Submit</button>
+              <button class="button chat-send" id="judgement-truth-submit" type="button" disabled>Submit</button>
             </div>
           </div>
           <!-- Reveal confidence only after the interviewer submits a truth choice. -->
@@ -105,7 +105,7 @@
                 <output id="confidence-output" for="judgement-confidence">50</output>
                 <input id="judgement-confidence" type="range" name="confidence" min="0" max="100" required>
               </label>
-              <button class="button chat-send" type="submit" aria-label="Submit confidence rating">Submit</button>
+              <button class="button chat-send" id="judgement-confidence-submit" type="submit" aria-label="Submit confidence rating" disabled>Submit</button>
             </div>
           </div>
         </fieldset>
