@@ -326,6 +326,9 @@ if (
       confidenceOutput.value = confidenceInput.value;
     });
   }
+  const judgementFeedback = role === "interviewer" 
+    ? document.getElementById("judgement-feedback") as HTMLDivElement | null
+    : null;
   // Add a submit handler for the optional judgement form; prevent native navigation and POST its truth/confidence values as JSON to the judgement endpoint.
   async function submitJudgement(event: Event) {
     event.preventDefault(); // Prevent the default form submission behavior
@@ -350,6 +353,9 @@ if (
             judgementStatus.classList.toggle("judgement-status--incorrect", !result.correct);
             judgementStatus.hidden = false;
             judgementFields.hidden = true; // Show feedback in place of the submitted judgement controls.
+            if (judgementFeedback) {
+              judgementFeedback.hidden = false; // Reveal the container holding both feedback and Continue.
+            }
             if (continueButton) {
               continueButton.hidden = false;
             }

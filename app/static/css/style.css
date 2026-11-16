@@ -1206,14 +1206,31 @@ h1 {
 
 .judgement-true:has(input:checked) {
   border-color: #17653e;
-  background: #17653e;
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink);
+}
+
+.judgement-true {
+  border-color: #167342;
+  background: #167342;
   color: #ffffff;
 }
 
 .judgement-false:has(input:checked) {
-  border-color: #a52a1c;
-  background: #a52a1c;
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink);
+}
+
+.judgement-false {
+  border-color: #b42318;
+  background: #b42318;
   color: #ffffff;
+}
+
+.judgement-true:hover {
+  background: #105d35;
+}
+
+.judgement-false:hover {
+  background: #8f1d14;
 }
 
 .judgement-choice input {
@@ -1231,6 +1248,7 @@ h1 {
 
 .judgement-confidence {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.3rem;
   color: var(--muted);
   font-size: 0.875rem;
@@ -1241,6 +1259,8 @@ h1 {
   /* Keep the native range control keyboard-operable while making its touch target comfortable. */
   -webkit-appearance: none;
   appearance: none;
+  grid-column: 1 / -1;
+  grid-row: 2;
   width: 100%;
   height: 2.75rem;
   box-sizing: border-box;
@@ -1249,6 +1269,15 @@ h1 {
   background: transparent;
   cursor: pointer;
   touch-action: pan-y;
+}
+
+.judgement-confidence output {
+  grid-column: 2;
+  grid-row: 1;
+  justify-self: end;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 /* Match the range track across WebKit browsers and Firefox. */

@@ -65,6 +65,7 @@
       <form class="chat-composer judgement-form" id="judgement-form" hidden>
         <fieldset class="judgement-fields" id="judgement-fields">
           <legend>Make your judgement</legend>
+          <p class="judgement-instruction">Was the claim true or false?</p>
           <div class="judgement-choices">
             <label class="judgement-choice judgement-true">
               <input type="radio" name="truth" value="true" required>
@@ -75,6 +76,7 @@
               <span>False</span>
             </label>
           </div>
+          <p class="judgement-instruction">How confident are you?</p>
           <label class="judgement-confidence" for="judgement-confidence">
             Confidence (0–100%)
             <input id="judgement-confidence" type="range" name="confidence" min="0" max="100" required>
@@ -82,8 +84,11 @@
           </label>
           <button class="chat-send" type="submit">Submit judgement</button>
         </fieldset>
-        <p class="judgement-status" id="judgement-status" role="status" aria-live="polite" hidden></p>
-        <button class="chat-send judgement-continue" id="judgement-continue" type="button" hidden>Continue</button>
+        <div class="judgement-feedback" id="judgement-feedback" hidden>
+          <p class="judgement-status" id="judgement-status" role="status" aria-live="polite" hidden></p>
+          <button class="chat-send judgement-continue" id="judgement-continue" type="button" hidden>Continue</button>
+        </div>
+        <!-- Removed as now included in the feedback div -->
       </form>
       {% endif %}
     </section>
