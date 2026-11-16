@@ -313,7 +313,8 @@ h1 {
 }
 
 .matching-ring--animated {
-  animation: matching-rotate 2.4s linear infinite;
+  /* Turn the ring around its vertical axis so it narrows into an oval like a spinning disk. */
+  animation: matching-disk-spin 2.4s linear infinite;
 }
 
 .matching-motion-toggle {
@@ -340,8 +341,9 @@ h1 {
   outline-offset: 3px;
 }
 
-@keyframes matching-rotate {
-  to { transform: rotate(360deg); }
+@keyframes matching-disk-spin {
+  from { transform: perspective(4rem) rotateY(0deg); }
+  to { transform: perspective(4rem) rotateY(360deg); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -998,7 +1000,7 @@ h1 {
 }
 
 #transition-ring {
-  margin: 0;
+  margin-block: 0.5rem;
 }
 
 .transition-maze {
@@ -1029,7 +1031,7 @@ h1 {
 
 .maze-board {
   display: grid;
-  grid-template-columns: repeat(5, clamp(2.2rem, 9vw, 2.75rem));
+  grid-template-columns: repeat(7, clamp(1.75rem, 8vw, 2.4rem));
   width: max-content;
   border: 2px solid var(--line);
   outline: none;
@@ -1278,6 +1280,12 @@ h1 {
   background: var(--surface);
   color: var(--ink);
   cursor: pointer;
+}
+
+/* Match the True/False control height to the adjacent shared-style Submit button. */
+.judgement-choice,
+.judgement-stage-row > .chat-send {
+  min-height: 3.6rem;
 }
 
 .judgement-true:has(input:checked) {

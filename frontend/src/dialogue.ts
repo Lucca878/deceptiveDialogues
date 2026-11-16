@@ -77,19 +77,20 @@ if (
   // Track the server's can_send value and use it to enable/disable both composer controls.
   let canSend = false; // Flag indicating whether the server allows this participant to send messages
   const renderedMessageIds = new Set<number>(); // Set of message IDs that have already been rendered to avoid duplicates
-  const mazeSize = 5; // Keep each optional client-only maze compact on phones and laptops.
+  const mazeSize = 7; // Use a larger optional client-only maze so its route takes more exploration.
+  const minimumMazePathLength = 16; // Reject layouts with a short, obvious route to the exit.
   let mazeLayout: number[][] = []; // Store only the current maze locally; never send maze state to the server.
   let previousMazeKey = ""; // Avoid immediately showing the same generated layout twice.
   let mazePosition = { row: 0, column: 0 }; // Start at the upper-left cell.
   type MazeDirection = "up" | "down" | "left" | "right";
 
-  function mazeHasPath(layout: number[][]): boolean {
-    const queue: Array<[number, number]> = [[0, 0]]; // Breadth-first search rejects generated layouts without a route to the exit.
+  function shortestMazePathLength(layout: number[][]): number | null {
+    const queue: Array<[number, number, number]> = [[0, 0, 0]]; // Breadth-first search records the shortest number of moves from the start.
     const visited = new Set(["0,0"]);
     const steps: Array<[number, number]> = [[-1, 0], [1, 0], [0, -1], [0, 1]];
     while (queue.length > 0) {
-      const [row, column] = queue.shift()!;
-      if (row === mazeSize - 1 && column === mazeSize - 1) return true;
+      const [row, column, distance] = queue.shift()!;
+      if (row === mazeSize - 1 && column === mazeSize - 1) return distance;
       for (const [rowStep, columnStep] of steps) {
         const nextRow = row + rowStep;
         const nextColumn = column + columnStep;
@@ -101,28 +102,40 @@ if (
           !visited.has(key)
         ) {
           visited.add(key);
-          queue.push([nextRow, nextColumn]);
+          queue.push([nextRow, nextColumn, distance + 1]);
         }
       }
     }
-    return false;
+    return null; // Return null when walls completely block the exit.
   }
 
   function createMaze(): number[][] {
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+    for (let attempt = 0; attempt < 1000; attempt += 1) { // Allow enough random tries to find a genuinely longer route.
       const candidate = Array.from({ length: mazeSize }, () =>
-        Array.from({ length: mazeSize }, () => Math.random() < 0.28 ? 1 : 0),
-      ); // Randomly place walls in a fresh client-only grid.
+        Array.from({ length: mazeSize }, () => Math.random() < 0.34 ? 1 : 0),
+      ); // Increase wall density to create more branches and dead ends.
       candidate[0][0] = 0; // Keep the start open.
       candidate[mazeSize - 1][mazeSize - 1] = 0; // Keep the exit open.
       const key = candidate.map((row) => row.join("")).join("/");
-      if (key !== previousMazeKey && mazeHasPath(candidate)) {
+      const shortestPathLength = shortestMazePathLength(candidate);
+      if (
+        key !== previousMazeKey &&
+        shortestPathLength !== null &&
+        shortestPathLength >= minimumMazePathLength
+      ) {
         previousMazeKey = key;
         return candidate;
       }
     }
-    previousMazeKey = "open-fallback"; // Fall back to an always-solvable open grid if random attempts fail.
-    return Array.from({ length: mazeSize }, () => Array.from({ length: mazeSize }, () => 0));
+    // Carve a guaranteed solvable serpentine route instead of falling back to an easy open grid.
+    const fallback = Array.from({ length: mazeSize }, () => Array.from({ length: mazeSize }, () => 1));
+    for (let row = 0; row < mazeSize; row += 2) fallback[row].fill(0); // Open alternating rows as long corridors.
+    for (let row = 1; row < mazeSize; row += 2) {
+      const connectorColumn = ((row - 1) / 2) % 2 === 0 ? mazeSize - 1 : 0; // Alternate the corridor connector side.
+      fallback[row][connectorColumn] = 0;
+    }
+    previousMazeKey = fallback.map((row) => row.join("")).join("/"); // Remember the fallback so random generation can reject it next time.
+    return fallback;
   }
 
   function startFreshMaze(statusText: string): void {
@@ -183,7 +196,7 @@ if (
   }
 
   if (mazeBoard && mazeStatus) {
-    startFreshMaze("Maze start: row 1, column 1. Exit: row 5, column 5.");
+    startFreshMaze(`Maze start: row 1, column 1. Exit: row ${mazeSize}, column ${mazeSize}.`);
     transitionPanel.addEventListener("keydown", (event: KeyboardEvent) => {
       if (transitionPanel.hidden) return;
       const directionByKey: Record<string, MazeDirection> = {
