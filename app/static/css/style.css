@@ -220,6 +220,24 @@ h1 {
   text-align: left;
 }
 
+/* Center only the ready-state content, leaving the instruction page left-aligned. */
+.role-instructions-card--waiting {
+  text-align: center;
+}
+
+.role-instructions-card--waiting .travel-lead {
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.role-instructions-waiting__progress {
+  margin: 1.5rem 0 1rem;
+}
+
+.role-instructions-waiting__progress .matching-ring {
+  margin-bottom: 0.5rem;
+}
+
 .role-instructions-card h2 {
   margin: 1.75rem 0 0.75rem;
   font-size: 1.15rem;
@@ -242,6 +260,25 @@ h1 {
 .role-instructions-actions {
   display: flex;
   justify-content: center;
+}
+
+/* Make the shared countdown replace all prior dialogue content in the chat area. */
+.transition-panel--countdown {
+  gap: 0.75rem;
+  padding: 2rem 1.25rem;
+  text-align: center;
+}
+
+.transition-panel--countdown .transition-message {
+  margin: 0;
+}
+
+.transition-panel--countdown .transition-countdown {
+  font-variant-numeric: tabular-nums;
+}
+
+.transition-panel--countdown #transition-ring {
+  display: none;
 }
 
 .travel-card h1,
@@ -1181,15 +1218,16 @@ h1 {
 
 .judgement-form {
   display: grid;
+  width: 100%;
   gap: 0.75rem;
   align-items: stretch;
 }
 
 .judgement-fields {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(8rem, 12rem) auto;
-  align-items: end;
-  gap: 0.75rem;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+  gap: 1rem;
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -1197,11 +1235,30 @@ h1 {
 }
 
 .judgement-fields legend {
-  grid-column: 1 / -1;
   margin-bottom: 0.25rem;
   padding: 0;
   color: var(--ink);
   font-weight: 600;
+}
+
+/* Keep each staged prompt and its controls grouped vertically. */
+.judgement-step {
+  display: grid;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.judgement-instruction {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.judgement-stage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
 }
 
 .judgement-choices {
@@ -1362,6 +1419,14 @@ h1 {
   text-align: left;
 }
 
+.judgement-feedback {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+}
+
 .judgement-status--correct {
   border-color: #9dc9aa;
   border-left-color: #17653e;
@@ -1377,22 +1442,18 @@ h1 {
 }
 
 .judgement-continue {
-  justify-self: start;
+  justify-self: end;
 }
 
 @media (max-width: 40rem) {
-  .judgement-fields {
-    grid-template-columns: 1fr;
-    align-items: stretch;
+  .judgement-stage-row {
+    gap: 0.5rem;
   }
 
-  .judgement-fields legend {
-    grid-column: 1;
-  }
-
-  .judgement-fields > .chat-send,
+  .judgement-stage-row > .chat-send,
   .judgement-continue {
-    width: 100%;
+    width: auto;
+    justify-self: end;
   }
 }
 

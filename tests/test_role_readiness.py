@@ -68,7 +68,7 @@ class RoleReadinessTests(unittest.TestCase):
         room["current_claim"]["question_turns_ended"] = True
         room["current_claim"]["judgement"] = {"judgement": "true", "confidence": 80}
 
-        with patch("server.monotonic", side_effect=[100.0, 101.0, 104.0, 104.0, 104.0, 104.0]):
+        with patch("server.monotonic", side_effect=[100.0, 101.0, 101.0, 104.0, 104.0, 104.0, 104.0]):
             continued = clients[interviewer_id].post(
                 "/api/rooms/ROOM01/continue",
                 json={"participant_id": interviewer_id},
@@ -84,6 +84,11 @@ class RoleReadinessTests(unittest.TestCase):
             self.assertEqual(countdown["dialogue_number"], 10)
             self.assertFalse(countdown["transition_complete"])
             self.assertEqual(room["current_claim_index"], 9)
+            interviewer_countdown = clients[interviewer_id].get(
+                f"/api/rooms/ROOM01/messages?participant_id={interviewer_id}"
+            ).get_json()
+            self.assertEqual(interviewer_countdown["seconds_remaining"], countdown["seconds_remaining"])
+            self.assertEqual(interviewer_countdown["dialogue_number"], countdown["dialogue_number"])
 
             for participant_id, client in clients.items():
                 with self.subTest(participant_id=participant_id):
@@ -165,7 +170,10 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(self.first.post("/role-instructions").location, "/role-instructions")
         for _ in range(2):
             response = self.first.get("/role-instructions")
-            self.assertIn(b"Waiting for your partner. Please keep this page open.", response.data)
+            self.assertIn(b"Waiting for your partner", response.data)
+            self.assertIn(b"Please keep this page open while you are waiting.", response.data)
+            self.assertIn(b"role-instructions-card--waiting", response.data)
+            self.assertIn(b'id="readiness-motion-toggle"', response.data)
             self.assertNotIn(b"I'm ready", response.data)
             self.first.post("/role-instructions")
             self.first.post("/api/rooms", json={"participant_id": "first"})
@@ -204,6 +212,9 @@ class RoleReadinessTests(unittest.TestCase):
             self.assertIn(b'id="dialogue-counter"', dialogue_response.data)
             self.assertIn(b'id="dialogue-progress-track"', dialogue_response.data)
             self.assertIn(b'id="question-counter"', dialogue_response.data)
+            self.assertIn(b'id="transition-countdown-label"', dialogue_response.data)
+            self.assertIn(b'id="transition-countdown"', dialogue_response.data)
+            self.assertIn(b'class="button chat-send"', dialogue_response.data)
             if status["role"] == "interviewee":
                 self.assertIn(b'id="transition-maze"', dialogue_response.data)
                 self.assertIn(b'class="maze-controls"', dialogue_response.data)
@@ -211,6 +222,10 @@ class RoleReadinessTests(unittest.TestCase):
             else:
                 self.assertNotIn(b'id="transition-maze"', dialogue_response.data)
                 self.assertIn(b'class="chat-composer judgement-form"', dialogue_response.data)
+                self.assertIn(b'id="judgement-truth-step"', dialogue_response.data)
+                self.assertIn(b'id="judgement-truth-submit" type="button">Submit', dialogue_response.data)
+                self.assertIn(b'id="judgement-confidence-step" hidden', dialogue_response.data)
+                self.assertIn(b'aria-label="Submit confidence rating">Submit', dialogue_response.data)
                 self.assertIn(b'id="judgement-status"', dialogue_response.data)
             clients_by_role[status["role"]] = (client, pid)
 

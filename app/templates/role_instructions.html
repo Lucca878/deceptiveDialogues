@@ -8,11 +8,15 @@
 </head>
 <body>
   <main class="travel-page">
-    <section class="travel-card role-instructions-card" aria-labelledby="role-instructions-title" id="role-instructions" data-room-code="{{ code }}" data-ready="{{ 'true' if ready else 'false' }}">
+    <section class="travel-card role-instructions-card{% if ready %} role-instructions-card--waiting{% endif %}" aria-labelledby="role-instructions-title" id="role-instructions" data-room-code="{{ code }}" data-ready="{{ 'true' if ready else 'false' }}">
       <!-- Match the heading to the ready state so the waiting screen doesn't still look like the instruction page. -->
       <h1 id="role-instructions-title">{{ 'Waiting for your partner' if ready else 'Your instructions' }}</h1>
       {% if ready %}
-      <div class="matching-ring matching-ring--animated" aria-hidden="true"></div>
+      <div class="matching-progress role-instructions-waiting__progress">
+        <!-- Keep the ring decorative and expose animation control as a keyboard-accessible button. -->
+        <div class="matching-ring matching-ring--animated" id="readiness-ring" aria-hidden="true"></div>
+        <button class="matching-motion-toggle" id="readiness-motion-toggle" type="button" aria-pressed="false" aria-controls="readiness-ring">Pause animation</button>
+      </div>
       <p class="travel-lead" id="readiness-status" role="status" aria-live="polite">Please keep this page open while you are waiting.</p>
       {% else %}
       {% if role == 'interviewer' %}

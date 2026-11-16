@@ -23,7 +23,10 @@ const questionProgressTrack = getElement<HTMLDivElement>("#question-progress-tra
 const questionProgressFill = getElement<HTMLSpanElement>("#question-progress-fill"); // Visual progress bar fill
 const role = sessionStorage.getItem("chat-role"); // User's role in the chat (interviewer or interviewee)
 const transitionPanel = getElement<HTMLDivElement>("#transition-panel"); // Shared waiting/countdown panel
+const transitionMessage = getElement<HTMLParagraphElement>("#transition-message"); // Neutral status before the shared countdown
+const transitionCountdownLabel = getElement<HTMLParagraphElement>("#transition-countdown-label"); // Shared countdown heading
 const transitionCountdown = getElement<HTMLDivElement>("#transition-countdown"); // Countdown shown after Continue
+const transitionMaze = document.querySelector<HTMLElement>("#transition-maze"); // Optional interviewee-only activity
 const judgementForm = 
   role === "interviewer"
   ? document.querySelector<HTMLFormElement>("#judgement-form") // Judgement form element (interviewer only)
@@ -38,6 +41,15 @@ const continueButton = role === "interviewer"
 const judgementFields = role === "interviewer"
   ? document.querySelector<HTMLFieldSetElement>("#judgement-fields")
   : null; // Fieldset containing the interviewer judgement controls.
+const judgementTruthStep = role === "interviewer"
+  ? document.querySelector<HTMLElement>("#judgement-truth-step")
+  : null; // Truth-only step of the judgement form.
+const judgementConfidenceStep = role === "interviewer"
+  ? document.querySelector<HTMLElement>("#judgement-confidence-step")
+  : null; // Confidence-only step of the judgement form.
+const judgementTruthSubmit = role === "interviewer"
+  ? document.querySelector<HTMLButtonElement>("#judgement-truth-submit")
+  : null; // Advances from the truth choice to confidence without submitting partial data.
 const mazeBoard = role === "interviewee"
   ? document.querySelector<HTMLDivElement>("#maze-board")
   : null; // The optional maze is rendered only for the interviewee.
@@ -267,14 +279,22 @@ if (
       const intervieweeWaiting = role === "interviewee" && data.question_turns_ended === true;
       const showTransitionPanel = countdownActive || intervieweeWaiting;
       transitionPanel.hidden = !showTransitionPanel;
-      messages.hidden = role === "interviewee" && showTransitionPanel;
+      transitionPanel.classList.toggle("transition-panel--countdown", countdownActive);
+      messages.hidden = countdownActive || intervieweeWaiting;
+      questionProgress.hidden = countdownActive;
+      transitionMessage.hidden = countdownActive;
+      transitionCountdownLabel.hidden = !countdownActive;
       transitionCountdown.hidden = !countdownActive;
-      if (countdownActive && typeof data.seconds_remaining === "number") {
-        const secondsRemaining = Math.ceil(data.seconds_remaining);
-        transitionCountdown.textContent = String(secondsRemaining);
+      if (transitionMaze) transitionMaze.hidden = countdownActive;
+      if (countdownActive) {
+        typingIndicator.hidden = true;
         form.hidden = true;
         if (judgementForm) judgementForm.hidden = true;
         if (continueButton) continueButton.hidden = true;
+      }
+      if (countdownActive && typeof data.seconds_remaining === "number") {
+        const secondsRemaining = Math.ceil(data.seconds_remaining);
+        transitionCountdown.textContent = String(secondsRemaining);
       }
       if (data.dialogue_complete === true) {
         window.location.replace("/feedback"); // Open the guarded feedback URL when the server reports completion.
@@ -314,7 +334,7 @@ if (
           questionProgressTrack.setAttribute("aria-label", "Questions completed");
         }
       }
-      typingIndicator.hidden = !data.partner_typing; // Show or hide the typing indicator based on the partner's typing status
+      typingIndicator.hidden = countdownActive || !data.partner_typing; // Keep typing activity hidden while the shared transition screen is shown
 
       for (const message of data.messages ?? []) {
         lastMessageId = Math.max(lastMessageId, message.id);
@@ -340,6 +360,20 @@ if (
       confidenceOutput.value = confidenceInput.value;
     });
   }
+  // Show the confidence step only after a truth choice has been made.
+  function advanceToConfidence(): void {
+    if (!judgementForm || !judgementTruthStep || !judgementConfidenceStep) return;
+    const selectedTruth = judgementForm.querySelector<HTMLInputElement>('input[name="truth"]:checked');
+    if (!selectedTruth) {
+      judgementForm.querySelector<HTMLInputElement>('input[name="truth"]')?.reportValidity();
+      return;
+    }
+    judgementTruthStep.hidden = true;
+    judgementConfidenceStep.hidden = false;
+    confidenceInput?.focus();
+  }
+  judgementTruthSubmit?.addEventListener("click", advanceToConfidence);
+
   const judgementFeedback = role === "interviewer" 
     ? document.getElementById("judgement-feedback") as HTMLDivElement | null
     : null;
@@ -372,6 +406,7 @@ if (
             }
             if (continueButton) {
               continueButton.hidden = false;
+              continueButton.focus(); // Move keyboard focus to the next available action.
             }
           } else {
             judgementStatus.textContent = "";
