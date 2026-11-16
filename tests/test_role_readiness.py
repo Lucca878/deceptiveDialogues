@@ -68,22 +68,68 @@ class RoleReadinessTests(unittest.TestCase):
         room["current_claim"]["question_turns_ended"] = True
         room["current_claim"]["judgement"] = {"judgement": "true", "confidence": 80}
 
-        continued = clients[interviewer_id].post(
-            "/api/rooms/ROOM01/continue",
-            json={"participant_id": interviewer_id},
-        )
+        with patch("server.monotonic", side_effect=[100.0, 101.0, 104.0, 104.0, 104.0, 104.0]):
+            continued = clients[interviewer_id].post(
+                "/api/rooms/ROOM01/continue",
+                json={"participant_id": interviewer_id},
+            )
+            self.assertEqual(continued.status_code, 201)
+            self.assertEqual(room["current_claim_index"], 9)
+            self.assertIsNotNone(room["current_claim"])
 
-        self.assertEqual(continued.status_code, 201)
-        self.assertEqual(room["current_claim_index"], 10)
-        self.assertIsNone(room["current_claim"])
-        for participant_id, client in clients.items():
-            with self.subTest(participant_id=participant_id):
-                poll = client.get(f"/api/rooms/ROOM01/messages?participant_id={participant_id}")
-                self.assertTrue(poll.get_json()["dialogue_complete"])
-                self.assertEqual(client.get("/dialogue").location, "/feedback")
-                feedback = client.get("/feedback")
-                self.assertEqual(feedback.status_code, 200)
-                self.assertIn(b"Thank you for completing all the dialogues.", feedback.data)
+            countdown = clients[interviewee_id].get(
+                f"/api/rooms/ROOM01/messages?participant_id={interviewee_id}"
+            ).get_json()
+            self.assertEqual(countdown["seconds_remaining"], 2.0)
+            self.assertFalse(countdown["transition_complete"])
+            self.assertEqual(room["current_claim_index"], 9)
+
+            for participant_id, client in clients.items():
+                with self.subTest(participant_id=participant_id):
+                    poll = client.get(f"/api/rooms/ROOM01/messages?participant_id={participant_id}")
+                    self.assertTrue(poll.get_json()["dialogue_complete"])
+                    self.assertTrue(poll.get_json()["transition_complete"])
+                    self.assertEqual(room["current_claim_index"], 10)
+                    self.assertIsNone(room["current_claim"])
+                    self.assertEqual(client.get("/dialogue").location, "/feedback")
+                    feedback = client.get("/feedback")
+                    self.assertEqual(feedback.status_code, 200)
+                    self.assertIn(b"Thank you for completing all the dialogues.", feedback.data)
+        self.assertNotIn("transition_pending", room)
+        self.assertNotIn("transition_end", room)
+
+    def test_message_poll_only_returns_messages_from_active_dialogue(self):
+        self.pair()
+        room = server.rooms["ROOM01"]
+        room["ready"].update(room["participants"])
+        for client in (self.first, self.second):
+            self.assertEqual(client.get("/dialogue").status_code, 200)
+        interviewer_id = next(pid for pid, role in room["participants"].items() if role == "interviewer")
+        interviewer_client = self.first if interviewer_id == "first" else self.second
+        room["messages"].append({
+            "id": len(room["messages"]) + 1,
+            "participant_id": interviewer_id,
+            "role": "interviewer",
+            "text": "Previous dialogue question",
+            "timestamp": "server timestamp",
+            "is_claim": False,
+        })
+
+        # Simulate the server advancing to dialogue two while preserving room history.
+        room["current_claim_index"] = 1
+        room["current_claim"] = None
+        room["next_speaker"] = None
+        next_dialogue = interviewer_client.get("/dialogue")
+        self.assertEqual(next_dialogue.status_code, 200)
+
+        current_messages = interviewer_client.get(
+            f"/api/rooms/ROOM01/messages?participant_id={interviewer_id}"
+        ).get_json()["messages"]
+
+        self.assertEqual(len(room["messages"]), 3)  # Keep both dialogues in the room's server-side history.
+        self.assertEqual(len(current_messages), 1)  # Show only the active dialogue in this browser view.
+        self.assertTrue(current_messages[0]["is_claim"])
+        self.assertIn("I have visited ", current_messages[0]["text"])
 
     def test_full_lifecycle_private_instructions_and_both_ready(self):
         self.assertEqual(self.first.get("/dialogue").location, "/room")
@@ -154,6 +200,11 @@ class RoleReadinessTests(unittest.TestCase):
             dialogue_response = client.get("/dialogue")
             self.assertEqual(dialogue_response.status_code, 200)
             self.assertIn(b'id="question-counter"', dialogue_response.data)
+            if status["role"] == "interviewee":
+                self.assertIn(b'id="transition-maze"', dialogue_response.data)
+                self.assertIn(b'class="maze-controls"', dialogue_response.data)
+            else:
+                self.assertNotIn(b'id="transition-maze"', dialogue_response.data)
             clients_by_role[status["role"]] = (client, pid)
 
         interviewer, interviewer_id = clients_by_role["interviewer"]
@@ -275,7 +326,7 @@ class RoleReadinessTests(unittest.TestCase):
             self.assertEqual(messages_response.status_code, 200)
             visible_messages = messages_response.get_json()["messages"]
             self.assertEqual(visible_messages[0]["role"], "interviewee")
-            self.assertEqual(set(visible_messages[0]), {"id", "participant_id", "role", "text"})
+            self.assertEqual(set(visible_messages[0]), {"id", "participant_id", "role", "text", "is_claim"})
             self.assertNotIn("truth_status", str(visible_messages))
             expected_typing_status = 200 if room["participants"][pid] == room["next_speaker"] else 403
             self.assertEqual(
@@ -296,6 +347,7 @@ class RoleReadinessTests(unittest.TestCase):
             "city_id": city_id,
             "truth_status": submission["answers"][city_id]["visited"] == "yes",
             "dialogue_id": 1,  # The first shuffled claim is recorded as dialogue one.
+            "opening_message_id": 1,
             "interviewer_question_count": 10,
             "question_turns_ended": True,
         })

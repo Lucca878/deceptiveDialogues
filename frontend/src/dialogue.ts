@@ -19,6 +19,8 @@ const questionProgressNote = getElement<HTMLSpanElement>("#question-progress-not
 const questionProgressTrack = getElement<HTMLDivElement>("#question-progress-track"); // Accessible progress bar
 const questionProgressFill = getElement<HTMLSpanElement>("#question-progress-fill"); // Visual progress bar fill
 const role = sessionStorage.getItem("chat-role"); // User's role in the chat (interviewer or interviewee)
+const transitionPanel = getElement<HTMLDivElement>("#transition-panel"); // Shared waiting/countdown panel
+const transitionCountdown = getElement<HTMLDivElement>("#transition-countdown"); // Countdown shown after Continue
 const judgementForm = 
   role === "interviewer"
   ? document.querySelector<HTMLFormElement>("#judgement-form") // Judgement form element (interviewer only)
@@ -30,6 +32,15 @@ const judgementStatus =
 const continueButton = role === "interviewer"
   ? document.querySelector<HTMLButtonElement>("#judgement-continue")
   : null; // Only the interviewer page contains the Continue button.
+const mazeBoard = role === "interviewee"
+  ? document.querySelector<HTMLDivElement>("#maze-board")
+  : null; // The optional maze is rendered only for the interviewee.
+const mazeStatus = role === "interviewee"
+  ? document.querySelector<HTMLParagraphElement>("#maze-status")
+  : null; // Screen-reader status for maze movement.
+const mazeControls = role === "interviewee"
+  ? document.querySelectorAll<HTMLButtonElement>("[data-maze-direction]")
+  : []; // Direction buttons are omitted from the interviewer page.
 const roomCode = sessionStorage.getItem("chat-room-code"); // Active chat room code
 const participantId = sessionStorage.getItem("participant-id"); // Unique identifier for the participant
 if (
@@ -48,6 +59,89 @@ if (
   // Track the server's can_send value and use it to enable/disable both composer controls.
   let canSend = false; // Flag indicating whether the server allows this participant to send messages
   const renderedMessageIds = new Set<number>(); // Set of message IDs that have already been rendered to avoid duplicates
+  const mazeLayout = [ // Fixed, client-only maze layout; walls are 1 and walkable cells are 0.
+    [0, 0, 1, 0, 0],
+    [1, 0, 1, 0, 1],
+    [0, 0, 0, 0, 0],
+    [0, 1, 1, 1, 0],
+    [0, 0, 0, 0, 0],
+  ];
+  let mazePosition = { row: 0, column: 0 }; // Start at the upper-left cell.
+  type MazeDirection = "up" | "down" | "left" | "right";
+
+  function renderMaze(): void {
+    if (!mazeBoard) return;
+    mazeBoard.replaceChildren();
+    for (let row = 0; row < mazeLayout.length; row += 1) {
+      for (let column = 0; column < mazeLayout[row].length; column += 1) {
+        const cell = document.createElement("span");
+        cell.className = "maze-cell";
+        if (mazeLayout[row][column] === 1) cell.classList.add("maze-cell--wall");
+        if (row === 0 && column === 0) cell.classList.add("maze-cell--start");
+        if (row === mazeLayout.length - 1 && column === mazeLayout[row].length - 1) {
+          cell.classList.add("maze-cell--exit");
+        }
+        if (row === mazePosition.row && column === mazePosition.column) {
+          cell.classList.add("maze-cell--player");
+        }
+        cell.setAttribute("aria-hidden", "true"); // The live status and controls provide the accessible interaction.
+        mazeBoard.append(cell);
+      }
+    }
+  }
+
+  function moveMaze(direction: MazeDirection): void {
+    if (!mazeBoard || !mazeStatus) return;
+    const offsets: Record<MazeDirection, [number, number]> = {
+      up: [-1, 0],
+      down: [1, 0],
+      left: [0, -1],
+      right: [0, 1],
+    };
+    const [rowOffset, columnOffset] = offsets[direction];
+    const nextRow = mazePosition.row + rowOffset;
+    const nextColumn = mazePosition.column + columnOffset;
+    if (
+      nextRow < 0 || nextRow >= mazeLayout.length ||
+      nextColumn < 0 || nextColumn >= mazeLayout[nextRow].length ||
+      mazeLayout[nextRow][nextColumn] === 1
+    ) {
+      mazeStatus.textContent = "That direction is blocked.";
+      return;
+    }
+
+    mazePosition = { row: nextRow, column: nextColumn };
+    renderMaze();
+    if (nextRow === mazeLayout.length - 1 && nextColumn === mazeLayout[nextRow].length - 1) {
+      mazeStatus.textContent = "Maze complete. You can keep waiting; the next dialogue will begin automatically.";
+      return;
+    }
+    mazeStatus.textContent = `You are at row ${nextRow + 1}, column ${nextColumn + 1}.`;
+  }
+
+  if (mazeBoard && mazeStatus) {
+    renderMaze();
+    mazeBoard.addEventListener("keydown", (event: KeyboardEvent) => {
+      const directionByKey: Record<string, MazeDirection> = {
+        ArrowUp: "up",
+        ArrowDown: "down",
+        ArrowLeft: "left",
+        ArrowRight: "right",
+      };
+      const direction = directionByKey[event.key];
+      if (!direction) return;
+      event.preventDefault();
+      moveMaze(direction);
+    });
+    mazeControls.forEach((button) => {
+      button.addEventListener("click", () => {
+        const direction = button.dataset.mazeDirection;
+        if (direction === "up" || direction === "down" || direction === "left" || direction === "right") {
+          moveMaze(direction);
+        }
+      });
+    });
+  }
 
   function pingTyping(): void { // Sends a typing ping to the server to indicate that the participant is currently typing
     // Send typing pings only while the server says this participant may speak.
@@ -71,6 +165,7 @@ if (
     participant_id: string;
     role: string;
     text: string;
+    is_claim?: boolean;
   }): void {
     if (renderedMessageIds.has(message.id)) return; // Skip rendering if this message has already been rendered
     renderedMessageIds.add(message.id); // Mark this message ID as rendered to prevent duplicate rendering
@@ -83,7 +178,7 @@ if (
     }
     bubble.textContent = message.text; // Set the text content of the chat message bubble
     messages.append(bubble); // Append the chat message bubble to the messages container
-    if (message.id === 1 && message.role === "interviewee") {
+    if (message.is_claim === true) {
       openingClaimReceived = true;
       input.placeholder = "Write a message...";
     }
@@ -103,17 +198,36 @@ if (
           participant_id: string;
           role: string;
           text: string;
+          is_claim?: boolean;
         }>; // Array of new messages from the server
         partner_typing?: boolean;
         can_send?: boolean;
         question_number?: number;
         question_turns_ended?: boolean;
         dialogue_complete?: boolean;
+        transition_complete?: boolean;
         error?: string;
+        seconds_remaining?: number;
       };
       if (!response.ok) throw new Error(data.error ?? "Could not load messages."); // Throw an error if the response is not OK
+      const countdownActive = typeof data.seconds_remaining === "number";
+      const intervieweeWaiting = role === "interviewee" && data.question_turns_ended === true;
+      const showTransitionPanel = countdownActive || intervieweeWaiting;
+      transitionPanel.hidden = !showTransitionPanel;
+      messages.hidden = role === "interviewee" && showTransitionPanel;
+      transitionCountdown.hidden = !countdownActive;
+      if (countdownActive && typeof data.seconds_remaining === "number") {
+        const secondsRemaining = Math.ceil(data.seconds_remaining);
+        transitionCountdown.textContent = String(secondsRemaining);
+        if (judgementForm) judgementForm.hidden = true;
+        if (continueButton) continueButton.hidden = true;
+      }
       if (data.dialogue_complete === true) {
         window.location.replace("/feedback"); // Open the guarded feedback URL when the server reports completion.
+        return;
+      }
+      if (data.transition_complete === true) {
+        window.location.replace("/dialogue"); // Navigate to the next dialogue after this participant's transition signal.
         return;
       }
       canSend = data.can_send === true;  // Update the canSend flag based on the server's response
@@ -201,7 +315,7 @@ if (
         body: JSON.stringify({ participant_id: activeParticipantId }),
       }); // Ask the server to advance the room after this judgement.
       if (!response.ok) throw new Error("Could not continue to the next claim.");
-      window.location.assign("/dialogue"); // Reload dialogue so the server creates the next claim.
+      // Keep both participants on this page so polling can show the shared countdown.
     } catch (error) {
       continueButton.disabled = false; // Allow a retry if the server could not advance the room.
       console.error(error instanceof Error ? error.message : "Could not continue to the next claim.");
@@ -233,6 +347,7 @@ if (
             participant_id: string;
             role: string;
             text: string;
+            is_claim?: boolean;
           };
           error?: string;
         };

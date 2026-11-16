@@ -27,6 +27,27 @@
         <p class="chat-empty" id="chat-empty">Send a message to begin.</p>
       </div>
 
+      <div class="transition-panel" id="transition-panel" hidden>
+        <!-- Keep the status neutral so it does not reveal the interviewer's judgement process. -->
+        <p class="transition-message" id="transition-message" role="status" aria-live="polite">Please wait here. The next dialogue will begin automatically.</p>
+        <div class="transition-countdown" id="transition-countdown" role="timer" aria-live="polite" hidden>3</div>
+        <div class="matching-ring matching-ring--animated" id="transition-ring" aria-hidden="true"></div>
+        {% if role == 'interviewee' %}
+        <!-- This optional client-only activity is only presented to the interviewee and never gates progression. -->
+        <section class="transition-maze" id="transition-maze" aria-labelledby="maze-title">
+          <h2 id="maze-title">Optional maze</h2>
+          <p id="maze-instructions">You can explore this small maze while you wait. Use the arrow keys or direction buttons. You may stop at any time. Once the interviewer is ready, the next dialogue will begin automatically</p>
+          <div class="maze-board" id="maze-board" tabindex="0" aria-label="Small maze board" aria-describedby="maze-instructions maze-status"></div>
+          <div class="maze-controls" role="group" aria-label="Maze direction controls">
+            <button class="maze-control" type="button" data-maze-direction="up">Up</button>
+            <button class="maze-control" type="button" data-maze-direction="left">Left</button>
+            <button class="maze-control" type="button" data-maze-direction="down">Down</button>
+            <button class="maze-control" type="button" data-maze-direction="right">Right</button>
+          </div>
+          <p class="visually-hidden" id="maze-status" role="status" aria-live="polite">Maze start: row 1, column 1. Exit: row 5, column 5.</p>
+        </section>
+        {% endif %}
+      </div>
       {% if role == 'interviewer' %}
       <form class="judgement-form" id="judgement-form" hidden>
         <fieldset>

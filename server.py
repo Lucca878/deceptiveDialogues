@@ -226,7 +226,10 @@ def _get_participant_id(data):
 
 
 def _message_for_client(message):
-    return {key: message[key] for key in ("id", "participant_id", "role", "text")}
+    return {
+        key: message[key]
+        for key in ("id", "participant_id", "role", "text")
+    } | {"is_claim": message.get("is_claim", False)}
 
 
 def _bound_room(code, claimed_id=None):
@@ -270,6 +273,36 @@ def _dialogue_complete(room):
     )
 
 
+def _advance_transition(room, now):
+    """Called under rooms_lock; advance the room once when its countdown expires."""
+    transition_end = room.get("transition_end")
+    if not isinstance(transition_end, (int, float)):
+        return None, False
+
+    seconds_remaining = max(0.0, transition_end - now)
+    if seconds_remaining == 0 and room.get("transition_advanced") is not True:
+        room["current_claim_index"] += 1
+        room["current_claim"] = None
+        room["next_speaker"] = None
+        room["typing"].clear()
+        room["transition_advanced"] = True
+    return seconds_remaining, seconds_remaining == 0
+
+
+def _acknowledge_transition(room, participant_id):
+    """Called under rooms_lock; retain transition state until both participants arrive."""
+    if room.get("transition_advanced") is not True:
+        return
+    pending = room.get("transition_pending")
+    if not isinstance(pending, set):
+        return
+    pending.discard(participant_id)
+    if not pending:
+        room.pop("transition_end", None)
+        room.pop("transition_advanced", None)
+        room.pop("transition_pending", None)
+
+
 @app.get("/")
 def landing():
     return render_template("landing.html")
@@ -286,6 +319,7 @@ def dialogue():
             return redirect(url_for("room"))
         if not _chat_ready(room):
             return redirect(url_for("role_instructions"))
+        _advance_transition(room, monotonic())
         if _dialogue_complete(room):
             return redirect(url_for("feedback"))
         # If there is no current claim, generate one based on the interviewee's next city and screening answers.
@@ -331,6 +365,7 @@ def dialogue():
                 "participant_id": interviewee_id,
                 "role": "interviewee",
                 "text": f"I have visited {city_name} in the past three years.",
+                "is_claim": True,
                 "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
             }
             # Append the claim message to the room's message list.
@@ -341,6 +376,7 @@ def dialogue():
                 "city_id": next_city,
                 "truth_status": answer["visited"] == "yes",
                 "dialogue_id": room["current_claim_index"]+1,
+                "opening_message_id": claim_message["id"],
             }
             # Initialize the interviewer-question counter for this claim to zero. Store the count in this room's current_claim state, so it resets for each new claim.
             room["current_claim"]["interviewer_question_count"] = 0
@@ -349,6 +385,7 @@ def dialogue():
             # Discard any typing pings sent before the opening claim was created.
             room["typing"].clear()
             # The current claim now reflects the interviewee's latest response.
+        _acknowledge_transition(room, participant_id)
         # Pass this participant's server-derived role into the template so interviewer-only judgement controls are never sent to the interviewee.
         return render_template("dialogue.html", role=room["participants"][participant_id])
 
@@ -366,6 +403,7 @@ def feedback():
             return redirect(url_for("role_instructions"))
         if not _dialogue_complete(room):
             return redirect(url_for("dialogue"))
+        _acknowledge_transition(room, participant_id)
         response = app.make_response(render_template("feedback.html"))
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -723,7 +761,6 @@ def submit_judgement(code):
     return jsonify(status="ok", correct=correct), 201
     
 
-# TODO 1: Add a POST continue endpoint that accepts only the bound interviewer after a judgement, advances the claim index, and preserves earlier dialogue messages.
 @app.post("/api/rooms/<code>/continue") # Advances the claim index after a judgement; only the bound interviewer can perform this action
 @consent_required
 @screening_required
@@ -744,9 +781,15 @@ def continue_claim(code):
             return jsonify(error="Only the interviewer can continue to the next claim."), 403
         if room["current_claim"].get("judgement") is None:
             return jsonify(error="A judgement must be submitted before continuing."), 403
+        if room.get("transition_end") is not None:
+            return jsonify(error="The next dialogue transition is already in progress."), 409
 
-        room["current_claim_index"] += 1 # Advance to the next claim in the room's claim list
-        room["current_claim"] = None # Clear the current claim to prepare for the next one
+        # Start a server-timed 3-second transition on this valid Continue click; keep the current claim until the countdown expires. We need to store the transition deadline in the room.
+        transition_start = monotonic() # Record the start time of the transition
+        transition_end = transition_start + 3.0
+        room["transition_end"] = transition_end # Store the transition deadline in the room
+        room["transition_advanced"] = False
+        room["transition_pending"] = set(room["participants"])
     return jsonify(status="ok"), 201
 
 TYPING_WINDOW_SECONDS = 3.0
@@ -796,8 +839,14 @@ def get_room_messages(code):
             _message_for_client(message)
             for message in room["messages"]
             if message["id"] > after_id
+            and message["id"] >= (
+                room["current_claim"]["opening_message_id"]
+                if room["current_claim"] is not None
+                else len(room["messages"]) + 1
+            )
         ]
         now = monotonic()
+        seconds_remaining, transition_expired = _advance_transition(room, now)
         partner_typing = any(
             partner_id != participant_id and now - last < TYPING_WINDOW_SECONDS
             for partner_id, last in room["typing"].items()
@@ -811,6 +860,11 @@ def get_room_messages(code):
             question_number = max(question_count, 1)
         else:
             question_number = min(question_count + 1, 10)
+        # A participant keeps receiving the completion signal until its page request acknowledges the transition.
+        pending = room.get("transition_pending", set())
+        transition_complete = transition_expired and participant_id in pending
+        if participant_id not in pending:
+            seconds_remaining = None
         # Report only the completion boolean, never the private shuffled claim order.
         dialogue_complete = _dialogue_complete(room)
         # This response is bound to the requester; it exposes no city answer or claim truth.
@@ -823,4 +877,6 @@ def get_room_messages(code):
         question_number=question_number,
         question_turns_ended=question_turns_ended,
         dialogue_complete=dialogue_complete,
+        seconds_remaining=seconds_remaining,
+        transition_complete=transition_complete,
     )
