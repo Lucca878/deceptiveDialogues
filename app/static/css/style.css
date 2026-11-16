@@ -874,6 +874,17 @@ h1 {
   background: color-mix(in srgb, var(--paper) 72%, var(--surface));
 }
 
+/* Give both progress indicators equal space and matching alignment. */
+.progress-pair {
+  display: flex;
+  gap: 1.5rem;
+}
+
+.progress-pair__item {
+  flex: 1;
+  min-width: 0;
+}
+
 .question-progress__labels {
   display: flex;
   align-items: baseline;
@@ -912,6 +923,14 @@ h1 {
   border-radius: inherit;
   background: #17653e;
   transition: width 0.2s ease;
+}
+
+/* Stack the indicators on narrow screens so their labels remain readable. */
+@media (max-width: 38rem) {
+  .progress-pair {
+    flex-direction: column;
+    gap: 0.75rem;
+  }
 }
 
 /* ---------- Shared transition and optional interviewee maze ---------- */

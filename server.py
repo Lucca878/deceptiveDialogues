@@ -867,6 +867,7 @@ def get_room_messages(code):
             seconds_remaining = None
         # Report only the completion boolean, never the private shuffled claim order.
         dialogue_complete = _dialogue_complete(room)
+        dialogue_number = current_claim["dialogue_id"] if current_claim else None
         # This response is bound to the requester; it exposes no city answer or claim truth.
         can_send = room["next_speaker"] == room["participants"][participant_id]
 
@@ -879,4 +880,5 @@ def get_room_messages(code):
         dialogue_complete=dialogue_complete,
         seconds_remaining=seconds_remaining,
         transition_complete=transition_complete,
+        dialogue_number=dialogue_number,
     )

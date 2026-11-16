@@ -15,12 +15,25 @@
 
     <section class="chat-panel" aria-label="Chat">
       <div class="question-progress" id="question-progress" hidden>
-        <div class="question-progress__labels">
-          <p class="question-counter" id="question-counter" aria-live="polite"></p>
-          <span class="question-progress__note" id="question-progress-note"></span>
-        </div>
-        <div class="question-progress__track" id="question-progress-track" role="progressbar" aria-label="Questions completed" aria-valuemin="0" aria-valuemax="10" aria-valuenow="0">
-          <span id="question-progress-fill"></span>
+        <!-- Keep dialogue and question progress together so both participants see the same study progress. -->
+        <div class="progress-pair">
+          <section class="progress-pair__item" aria-label="Dialogue progress">
+            <div class="question-progress__labels">
+              <p class="question-counter" id="dialogue-counter" aria-live="polite"></p>
+            </div>
+            <div class="question-progress__track" id="dialogue-progress-track" role="progressbar" aria-label="Dialogue progress" aria-valuemin="0" aria-valuemax="10" aria-valuenow="0">
+              <span id="dialogue-progress-fill"></span>
+            </div>
+          </section>
+          <section class="progress-pair__item" aria-label="Question progress">
+            <div class="question-progress__labels">
+              <p class="question-counter" id="question-counter" aria-live="polite"></p>
+              <span class="question-progress__note" id="question-progress-note"></span>
+            </div>
+            <div class="question-progress__track" id="question-progress-track" role="progressbar" aria-label="Questions completed" aria-valuemin="0" aria-valuemax="10" aria-valuenow="0">
+              <span id="question-progress-fill"></span>
+            </div>
+          </section>
         </div>
       </div>
       <div class="chat-messages" id="chat-messages" aria-live="polite">

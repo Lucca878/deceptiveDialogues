@@ -14,6 +14,9 @@ const messages = getElement<HTMLDivElement>("#chat-messages"); // Container for 
 const emptyState = getElement<HTMLParagraphElement>("#chat-empty"); // Empty state message element
 const typingIndicator = getElement<HTMLParagraphElement>("#chat-typing"); // Typing indicator element 
 const questionProgress = getElement<HTMLDivElement>("#question-progress"); // Question progress container
+const dialogueCounter = getElement<HTMLParagraphElement>("#dialogue-counter"); // Current server-reported dialogue label
+const dialogueProgressTrack = getElement<HTMLDivElement>("#dialogue-progress-track"); // Accessible dialogue progress bar
+const dialogueProgressFill = getElement<HTMLSpanElement>("#dialogue-progress-fill"); // Visual dialogue progress fill
 const questionCounter = getElement<HTMLParagraphElement>("#question-counter"); // Server-provided question progress status
 const questionProgressNote = getElement<HTMLSpanElement>("#question-progress-note"); // Supporting question progress status
 const questionProgressTrack = getElement<HTMLDivElement>("#question-progress-track"); // Accessible progress bar
@@ -254,6 +257,7 @@ if (
         question_number?: number;
         question_turns_ended?: boolean;
         dialogue_complete?: boolean;
+        dialogue_number?: number | null; // Active dialogue number, or null when no claim is active
         transition_complete?: boolean;
         error?: string;
         seconds_remaining?: number;
@@ -281,6 +285,16 @@ if (
         return;
       }
       canSend = data.can_send === true;  // Update the canSend flag based on the server's response
+      if (Number.isInteger(data.dialogue_number) && data.dialogue_number! >= 1 && data.dialogue_number! <= 10) {
+        const dialogueNumber = data.dialogue_number!;
+        dialogueCounter.textContent = `Dialogue ${dialogueNumber} of 10`;
+        dialogueProgressTrack.setAttribute("aria-valuenow", String(dialogueNumber));
+        dialogueProgressFill.style.width = `${dialogueNumber * 10}%`;
+      } else {
+        dialogueCounter.textContent = "";
+        dialogueProgressTrack.setAttribute("aria-valuenow", "0");
+        dialogueProgressFill.style.width = "0%";
+      }
       if (Number.isInteger(data.question_number) && data.question_number! >= 1 && data.question_number! <= 10) {
         const questionNumber = data.question_number!;
         questionProgress.hidden = false;

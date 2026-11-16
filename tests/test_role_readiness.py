@@ -81,6 +81,7 @@ class RoleReadinessTests(unittest.TestCase):
                 f"/api/rooms/ROOM01/messages?participant_id={interviewee_id}"
             ).get_json()
             self.assertEqual(countdown["seconds_remaining"], 2.0)
+            self.assertEqual(countdown["dialogue_number"], 10)
             self.assertFalse(countdown["transition_complete"])
             self.assertEqual(room["current_claim_index"], 9)
 
@@ -89,6 +90,7 @@ class RoleReadinessTests(unittest.TestCase):
                     poll = client.get(f"/api/rooms/ROOM01/messages?participant_id={participant_id}")
                     self.assertTrue(poll.get_json()["dialogue_complete"])
                     self.assertTrue(poll.get_json()["transition_complete"])
+                    self.assertIsNone(poll.get_json()["dialogue_number"])
                     self.assertEqual(room["current_claim_index"], 10)
                     self.assertIsNone(room["current_claim"])
                     self.assertEqual(client.get("/dialogue").location, "/feedback")
@@ -199,6 +201,8 @@ class RoleReadinessTests(unittest.TestCase):
             self.assertEqual(client.get("/role-instructions").location, "/dialogue")
             dialogue_response = client.get("/dialogue")
             self.assertEqual(dialogue_response.status_code, 200)
+            self.assertIn(b'id="dialogue-counter"', dialogue_response.data)
+            self.assertIn(b'id="dialogue-progress-track"', dialogue_response.data)
             self.assertIn(b'id="question-counter"', dialogue_response.data)
             if status["role"] == "interviewee":
                 self.assertIn(b'id="transition-maze"', dialogue_response.data)
@@ -222,6 +226,11 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertIs(interviewee_poll["can_send"], False)
         self.assertEqual(interviewer_poll["question_number"], 1)
         self.assertEqual(interviewee_poll["question_number"], 1)
+        # Both roles receive the same active dialogue number without private claim data.
+        self.assertEqual(interviewer_poll["dialogue_number"], 1)
+        self.assertEqual(interviewee_poll["dialogue_number"], 1)
+        self.assertNotIn("truth_status", interviewer_poll)
+        self.assertNotIn("truth_status", interviewee_poll)
         self.assertIs(interviewer_poll["question_turns_ended"], False)
 
         # After the claim appears, test that the interviewee's out-of-turn message is rejected.
