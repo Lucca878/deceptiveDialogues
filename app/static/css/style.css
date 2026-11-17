@@ -492,7 +492,8 @@ h1 {
 }
 
 .travel-field input:not([type="radio"]),
-.travel-field select {
+.travel-field select,
+.travel-field textarea {
   width: 100%;
   min-height: 2.9rem;
   padding: 0.65rem 0.75rem;
@@ -502,6 +503,21 @@ h1 {
   color: var(--ink);
   font: inherit;
   font-size: 0.9rem;
+}
+
+.travel-field textarea {
+  min-height: 7rem;
+  resize: vertical;
+}
+
+.feedback-text-field {
+  margin-top: 1.25rem;
+}
+
+.feedback-field__help {
+  margin: -0.15rem 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .travel-field input[aria-invalid="true"],
@@ -522,6 +538,7 @@ h1 {
 
 .travel-field input:focus-visible,
 .travel-field select:focus-visible,
+.travel-field textarea:focus-visible,
 .familiarity-option input:focus-visible + span {
   outline: 3px solid #7da991;
   outline-offset: 2px;
@@ -532,6 +549,10 @@ h1 {
   margin-top: 0.35rem;
   color: #8f1d14;
   font-size: 0.8rem;
+}
+
+.field-error:empty {
+  display: none;
 }
 
 .familiarity-field {

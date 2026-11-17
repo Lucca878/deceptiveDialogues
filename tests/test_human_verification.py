@@ -194,15 +194,22 @@ class HumanVerificationTests(unittest.TestCase):
         self.assertEqual(first.post("/role-instructions").status_code, 302)
         self.assertEqual(first.get("/dialogue").location, "/role-instructions")
         second.post("/role-instructions")
+        clients_by_role = {}
         for client, participant_id in ((first, "first"), (second, "second")):
             self.assertEqual(client.get("/dialogue").status_code, 200)
-            self.assertTrue(client.get("/api/rooms/ROOM01").get_json()["chat_ready"])
-            for _ in range(2):
-                self.assertEqual(client.post("/api/rooms/ROOM01/messages", json={
-                    "participant_id": participant_id, "text": "Hello",
-                }).status_code, 201)
-                self.assertEqual(client.get("/api/rooms/ROOM01/messages", query_string={
-                    "participant_id": participant_id,
+            room_status = client.get("/api/rooms/ROOM01").get_json()
+            self.assertTrue(room_status["chat_ready"])
+            clients_by_role[room_status["role"]] = (client, participant_id)
+
+        # Send one message from each role in the server-enforced turn order.
+        for role in ("interviewer", "interviewee"):
+            client, participant_id = clients_by_role[role]
+            self.assertEqual(client.post("/api/rooms/ROOM01/messages", json={
+                "participant_id": participant_id, "text": "Hello",
+            }).status_code, 201)
+            for poll_client, poll_id in ((first, "first"), (second, "second")):
+                self.assertEqual(poll_client.get("/api/rooms/ROOM01/messages", query_string={
+                    "participant_id": poll_id,
                 }).status_code, 200)
         self.assertEqual(self.urlopen.call_count, 2)
 

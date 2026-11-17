@@ -94,10 +94,13 @@ class RoomMatchingTests(unittest.TestCase):
         client.post("/role-instructions")
         partner.post("/role-instructions")
         self.assertEqual(client.get("/dialogue").status_code, 200)
+        # Room roles are random; send from the interviewer, who owns the first turn.
+        first_status = client.get("/api/rooms/ROOM01?participant_id=first").get_json()
+        sender, sender_id = (client, "first") if first_status["role"] == "interviewer" else (partner, "second")
 
-        sent = client.post(
+        sent = sender.post(
             "/api/rooms/ROOM01/messages",
-            json={"participant_id": "first", "text": "Hello", "timestamp": "client value"},
+            json={"participant_id": sender_id, "text": "Hello", "timestamp": "client value"},
         )
         self.assertEqual(sent.status_code, 201)
         self.assertNotIn("timestamp", sent.get_json()["message"])
@@ -107,8 +110,8 @@ class RoomMatchingTests(unittest.TestCase):
         self.assertEqual(timestamp.tzinfo, timezone.utc)
         self.assertNotEqual(stored_message["timestamp"], "client value")
 
-        received = client.get(
-            "/api/rooms/ROOM01/messages?participant_id=first&after_id=0"
+        received = sender.get(
+            f"/api/rooms/ROOM01/messages?participant_id={sender_id}&after_id=0"
         ).get_json()
         sent_message = next(message for message in received["messages"] if message["text"] == "Hello")
         self.assertNotIn("timestamp", sent_message)

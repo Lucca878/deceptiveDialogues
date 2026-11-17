@@ -404,9 +404,75 @@ def feedback():
         if not _dialogue_complete(room):
             return redirect(url_for("dialogue"))
         _acknowledge_transition(room, participant_id)
-        response = app.make_response(render_template("feedback.html"))
+        # Keep the completion page final for this participant after feedback is saved.
+        submitted = participant_id in room.get("feedback_submissions", {})
+        response = app.make_response(render_template("feedback.html", submitted=submitted))
         response.headers["Cache-Control"] = "no-store"
         return response
+
+
+@app.post("/submit_feedback")
+@consent_required
+@screening_required
+@instructions_required
+def submit_feedback():
+    # Bind this submission to the room participant in the signed session, not a posted participant ID.
+    room_code = session.get("room_code", "")
+    participant_id = session.get("room_participant_id", "")
+    errors = {}
+    values = {
+        "task_skill": request.form.get("task_skill", ""),
+        "task_difficulty": request.form.get("task_difficulty", ""),
+        "task_motivation": request.form.get("task_motivation", ""),
+        "strategy": request.form.get("strategy", ""),
+        "additional_feedback": request.form.get("additional_feedback", ""),
+    }
+
+    with rooms_lock:
+        room, participant_id = _bound_room(room_code, participant_id)
+        if room is None or room["participants"][participant_id] is None:
+            return redirect(url_for("room"))
+        if not _chat_ready(room):
+            return redirect(url_for("role_instructions"))
+        if not _dialogue_complete(room):
+            return redirect(url_for("dialogue"))
+        # Preserve the first saved form response; refreshes or repeated POSTs cannot overwrite it.
+        if participant_id in room.get("feedback_submissions", {}):
+            return redirect(url_for("feedback"))
+
+        # Each required rating must be exactly one value from the seven-point scale.
+        for field in ("task_skill", "task_difficulty", "task_motivation"):
+            submitted_values = request.form.getlist(field)
+            if len(submitted_values) != 1 or submitted_values[0] not in {str(value) for value in range(1, 8)}:
+                errors[field] = "Choose one rating from 1 to 7."
+
+        # Count whitespace-separated words so repeated spaces cannot bypass the five-word limit.
+        strategy_words = values["strategy"].split()
+        if not strategy_words:
+            errors["strategy"] = "Enter your main strategy."
+        elif len(strategy_words) > 5:
+            errors["strategy"] = "Use no more than five words."
+
+        if errors:
+            response = app.make_response(render_template(
+                "feedback.html", submitted=False, errors=errors, values=values,
+            ))
+            response.status_code = 400
+            response.headers["Cache-Control"] = "no-store"
+            return response
+
+        # Save only this participant's feedback, with a server-generated timestamp, in room memory.
+        room.setdefault("feedback_submissions", {})[participant_id] = {
+            "task_skill": int(values["task_skill"]),
+            "task_difficulty": int(values["task_difficulty"]),
+            "task_motivation": int(values["task_motivation"]),
+            "strategy": values["strategy"].strip(),
+            "additional_feedback": values["additional_feedback"],
+            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+        }
+
+    # Use Post/Redirect/Get so refreshing the confirmation page does not resubmit the form.
+    return redirect(url_for("feedback"))
 
 
 @app.get("/room")

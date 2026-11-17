@@ -38,6 +38,16 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(self.first.post("/api/rooms", json={"participant_id": "first"}).get_json()["status"], "waiting")
         self.assertEqual(self.second.post("/api/rooms", json={"participant_id": "second"}).get_json()["status"], "paired")
 
+    def complete_dialogues(self):
+        """Prepare a paired room whose server-side claim order is complete."""
+        self.pair()
+        room = server.rooms["ROOM01"]
+        room["ready"].update(room["participants"])
+        room["current_claim_index"] = 10
+        room["current_claim"] = None
+        room["next_speaker"] = None
+        return room
+
     def status(self, client):
         response = client.get("/api/rooms/ROOM01")
         self.assertEqual(response.status_code, 200)
@@ -104,6 +114,69 @@ class RoleReadinessTests(unittest.TestCase):
                     self.assertIn(b"Thank you for completing all the dialogues.", feedback.data)
         self.assertNotIn("transition_pending", room)
         self.assertNotIn("transition_end", room)
+
+    def test_feedback_submission_requires_all_ten_dialogues(self):
+        self.pair()
+        room = server.rooms["ROOM01"]
+        room["ready"].update(room["participants"])
+
+        response = self.first.post("/submit_feedback", data={})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/dialogue")
+        self.assertNotIn("feedback_submissions", room)
+
+    def test_feedback_validates_ratings_and_five_word_strategy_limit(self):
+        room = self.complete_dialogues()
+        response = self.first.post("/submit_feedback", data={
+            "task_skill": "8",
+            "task_difficulty": "4",
+            "task_motivation": "",
+            "strategy": "one two three four five six",
+            "additional_feedback": "Optional note",
+        })
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"Choose one rating from 1 to 7.", response.data)
+        self.assertIn(b"Use no more than five words.", response.data)
+        self.assertIn(b'value="4" checked', response.data)
+        self.assertEqual(room.get("feedback_submissions", {}), {})
+
+    def test_feedback_saves_once_in_memory_and_shows_completion(self):
+        room = self.complete_dialogues()
+        response = self.first.post("/submit_feedback", data={
+            "task_skill": "6",
+            "task_difficulty": "2",
+            "task_motivation": "7",
+            "strategy": "Ask focused follow-up questions",
+            "additional_feedback": "",
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/feedback")
+        saved = room["feedback_submissions"]["first"]
+        self.assertEqual(saved["task_skill"], 6)
+        self.assertEqual(saved["task_difficulty"], 2)
+        self.assertEqual(saved["task_motivation"], 7)
+        self.assertEqual(saved["strategy"], "Ask focused follow-up questions")
+        self.assertEqual(saved["additional_feedback"], "")
+        self.assertIn("timestamp", saved)
+
+        duplicate = self.first.post("/submit_feedback", data={
+            "task_skill": "1",
+            "task_difficulty": "1",
+            "task_motivation": "1",
+            "strategy": "Changed answer",
+            "additional_feedback": "Changed note",
+        })
+        self.assertEqual(duplicate.status_code, 302)
+        self.assertEqual(duplicate.location, "/feedback")
+        self.assertEqual(room["feedback_submissions"]["first"], saved)
+
+        confirmation = self.first.get("/feedback")
+        self.assertEqual(confirmation.status_code, 200)
+        self.assertIn(b"Your feedback has been submitted.", confirmation.data)
+        self.assertNotIn(b'action="/submit_feedback"', confirmation.data)
 
     def test_message_poll_only_returns_messages_from_active_dialogue(self):
         self.pair()
