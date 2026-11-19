@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 import server
+from app.database import db, Participant, Room as ArchivedRoom
 
 
 class RoleReadinessTests(unittest.TestCase):
@@ -10,9 +11,12 @@ class RoleReadinessTests(unittest.TestCase):
         config = patch.dict(server.app.config, TURNSTILE_ENABLED=False)
         config.start()
         self.addCleanup(config.stop)
+        with server.app.app_context():
+            db.create_all()
         with server.rooms_lock:
             server.rooms.clear()
             server.screening_submissions.clear()
+            server.study_sessions.clear()
         self.first = self.eligible_client()
         self.second = self.eligible_client()
 
@@ -20,6 +24,10 @@ class RoleReadinessTests(unittest.TestCase):
         with server.rooms_lock:
             server.rooms.clear()
             server.screening_submissions.clear()
+            server.study_sessions.clear()
+        with server.app.app_context():
+            db.session.remove()
+            db.drop_all()
 
     def eligible_client(self):
         """Use separate real consent, screening and pre-match sessions."""
@@ -66,12 +74,70 @@ class RoleReadinessTests(unittest.TestCase):
             "truth_status": True,
             "dialogue_id": 1,
             "opening_message_id": 1,
+            "started_at": "2026-01-01T10:00:00.000+00:00",
+            "conversation_ended_at": "2026-01-01T10:00:10.000+00:00",
+            "dialogue_duration_seconds": 10.0,
+            "judgement_started_at": "2026-01-01T10:00:10.000+00:00",
+            "judgement_submitted_at": None,
+            "judgement_ended_at": None,
+            "judgement_duration_seconds": None,
             "interviewer_question_count": 10,
             "question_turns_ended": True,
             "judgement": None,
         }
         room["next_speaker"] = None
         return room, clients[interviewer_id], interviewer_id, clients[interviewee_id], interviewee_id
+
+    def test_start_click_and_page_visits_use_server_timestamps(self):
+        client = server.app.test_client()
+        timestamps = iter((
+            "2026-01-01T09:00:00.000+00:00",  # Landing page entry.
+            "2026-01-01T09:01:00.000+00:00",  # First Start-the-study click.
+            "2026-01-01T09:01:02.000+00:00",  # Consent page entry.
+        ))
+
+        with patch("server._utc_timestamp", side_effect=lambda: next(timestamps)):
+            landing = client.get("/")
+            self.assertEqual(landing.status_code, 200)
+            start = client.get("/start")
+            self.assertEqual(start.status_code, 302)
+            consent = client.get("/consent")
+            self.assertEqual(consent.status_code, 200)
+
+        with client.session_transaction() as browser_session:
+            study_session_id = browser_session["study_session_id"]
+            self.assertEqual(browser_session["study_started_at"], "2026-01-01T09:01:00.000+00:00")
+        self.assertEqual(len(study_session_id), 32)
+        state = server.study_sessions[study_session_id]
+        self.assertEqual(state["study_started_at"], "2026-01-01T09:01:00.000+00:00")
+        self.assertEqual([visit["page_name"] for visit in state["page_visits"]], ["landing", "consent"])
+        self.assertEqual(state["page_visits"][0]["exited_at"], "2026-01-01T09:01:00.000+00:00")
+        self.assertEqual(state["page_visits"][0]["duration_seconds"], 60.0)
+        self.assertIsNone(state["page_visits"][1]["exited_at"])
+
+    def test_dialogue_and_judgement_durations_include_feedback_until_continue(self):
+        room, interviewer, interviewer_id, _, _ = self.prepare_judgement("feedback")
+        judgement_submitted_at = "2026-01-01T10:00:20.000+00:00"
+        continue_clicked_at = "2026-01-01T10:00:50.000+00:00"
+
+        with patch("server._utc_timestamp", side_effect=(judgement_submitted_at, continue_clicked_at)):
+            submitted = interviewer.post("/api/rooms/ROOM01/judgement", json={
+                "participant_id": interviewer_id,
+                "judgement": "true",
+                "confidence": 80,
+            })
+            self.assertEqual(submitted.status_code, 201)
+            continued = interviewer.post("/api/rooms/ROOM01/continue", json={
+                "participant_id": interviewer_id,
+            })
+
+        self.assertEqual(continued.status_code, 201)
+        claim = room["current_claim"]
+        self.assertEqual(claim["conversation_ended_at"], "2026-01-01T10:00:10.000+00:00")
+        self.assertEqual(claim["dialogue_duration_seconds"], 10.0)
+        self.assertEqual(claim["judgement_submitted_at"], judgement_submitted_at)
+        self.assertEqual(claim["judgement_ended_at"], continue_clicked_at)
+        self.assertEqual(claim["judgement_duration_seconds"], 40.0)
 
     def prepare_message_turn(self):
         """Prepare a ready pair with the interviewer allowed to send the first question."""
@@ -117,7 +183,7 @@ class RoleReadinessTests(unittest.TestCase):
         room["current_claim_index"] = 9
         room["current_claim"]["dialogue_id"] = 10
         room["current_claim"]["question_turns_ended"] = True
-        room["current_claim"]["judgement"] = {"judgement": "true", "confidence": 80}
+        room["current_claim"]["judgement"] = {"judgement": "true", "confidence": 80, "correct": True}
 
         with patch("server.monotonic", side_effect=[100.0, 101.0, 101.0, 104.0, 104.0, 104.0, 104.0]):
             continued = clients[interviewer_id].post(
@@ -213,6 +279,66 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(duplicate.status_code, 302)
         self.assertEqual(duplicate.location, "/debriefing")
         self.assertEqual(room["feedback_submissions"]["first"], saved)
+
+        # A valid feedback submit must archive the completed participant and room snapshot in the TEST DB.
+        with self.first.session_transaction() as browser_session:
+            first_study_session_id = browser_session["study_session_id"]
+        with server.app.app_context():
+            first_record = db.session.get(Participant, first_study_session_id)
+            self.assertEqual(first_record.dataset, "test")
+            self.assertEqual(len(first_record.screening_submissions[0].answers), 20)
+            archived_room = db.session.get(ArchivedRoom, room["archive_id"])
+            self.assertEqual(archived_room.condition, room["conditions"][next(
+                pid for pid, role in room["participants"].items() if role == "interviewer"
+            )])
+            self.assertEqual(len(archived_room.messages), len(room["messages"]))
+
+    def test_second_feedback_updates_same_archived_room(self):
+        room = self.complete_dialogues()
+
+        for client, task_skill in ((self.first, "4"), (self.second, "6")):
+            response = client.post("/submit_feedback", data={
+                "task_skill": task_skill,
+                "task_difficulty": "3",
+                "task_motivation": "5",
+                "strategy": "Ask focused questions",
+                "additional_feedback": "",
+            })
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "/debriefing")
+
+        with server.app.app_context():
+            self.assertEqual(db.session.query(Participant).count(), 2)
+            self.assertEqual(db.session.query(ArchivedRoom).count(), 1)
+            archived_room = db.session.get(ArchivedRoom, room["archive_id"])
+            self.assertEqual(len(archived_room.feedback_submissions), 2)
+            self.assertEqual(len(archived_room.dialogues), 0)
+            self.assertEqual(len(archived_room.messages), len(room["messages"]))
+
+    def test_feedback_archive_failure_is_retryable_and_does_not_save_partial_data(self):
+        room = self.complete_dialogues()
+        form_data = {
+            "task_skill": "5",
+            "task_difficulty": "4",
+            "task_motivation": "6",
+            "strategy": "Ask focused questions",
+            "additional_feedback": "",
+        }
+
+        with patch("app.study_data.db.session.begin", side_effect=server.db.exc.SQLAlchemyError("TEST database unavailable")):
+            failed = self.first.post("/submit_feedback", data=form_data)
+
+        self.assertEqual(failed.status_code, 503)
+        self.assertIn(b"We could not securely save your feedback. Please try again.", failed.data)
+        self.assertNotIn("first", room.get("feedback_submissions", {}))
+        with server.app.app_context():
+            self.assertEqual(db.session.query(Participant).count(), 0)
+            self.assertEqual(db.session.query(ArchivedRoom).count(), 0)
+
+        retried = self.first.post("/submit_feedback", data=form_data)
+        self.assertEqual(retried.status_code, 302)
+        self.assertEqual(retried.location, "/debriefing")
+        self.assertIn("first", room["feedback_submissions"])
 
     def test_debriefing_requires_completed_dialogues_and_feedback(self):
         # A participant cannot open debriefing before both members are ready.
@@ -314,15 +440,102 @@ class RoleReadinessTests(unittest.TestCase):
 
         # The configured destination is used for both automatic navigation and the manual fallback.
         room["feedback_submissions"] = {"first": {"timestamp": "server timestamp"}}
-        destination = "https://app.prolific.com/submissions/complete?cc=TEST123"
-        with patch.dict(server.app.config, {"PROLIFIC_COMPLETION_URL": destination}):
-            response = self.first.get("/study-ended")
+        response = self.first.get("/study-ended")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.assertIn(b"You will be redirected to Prolific", response.data)
-        self.assertIn(f'href="{destination}"'.encode(), response.data)
-        self.assertIn(f'content="10;url={destination}"'.encode(), response.data)
+        self.assertIn(b'href="/complete-study"', response.data)
+        self.assertIn(b'content="10;url=/complete-study"', response.data)
+
+    def test_complete_study_records_server_redirect_time_and_total_duration(self):
+        room = self.complete_dialogues()
+        with self.first.session_transaction() as browser_session:
+            first_study_session_id = browser_session["study_session_id"]
+            browser_session["study_started_at"] = "2026-01-01T10:00:00.000+00:00"
+        with self.second.session_transaction() as browser_session:
+            second_study_session_id = browser_session["study_session_id"]
+            browser_session["study_started_at"] = "2026-01-01T10:00:00.000+00:00"
+
+        def seed_study_state(study_session_id):
+            visit = {
+                "sequence": 1,
+                "page_name": "study-ended",
+                "entered_at": "2026-01-01T10:01:00.000+00:00",
+                "exited_at": None,
+                "duration_seconds": None,
+            }
+            server.study_sessions[study_session_id] = {
+                "study_started_at": "2026-01-01T10:00:00.000+00:00",
+                "consent_accepted": True,
+                "consent_accepted_at": "2026-01-01T10:00:00.000+00:00",
+                "entry_verified": False,
+                "travel_intro_seen": True,
+                "travel_screened_out": False,
+                "screening_complete_version": server.SCREENING_VERSION,
+                "instructions_complete": True,
+                "room_code": "ROOM01",
+                "participant_id": "first" if study_session_id == first_study_session_id else "second",
+                "page_visits": [visit],
+                "open_page_visit": visit,
+            }
+
+        seed_study_state(first_study_session_id)
+        seed_study_state(second_study_session_id)
+        for client in (self.first, self.second):
+            feedback = client.post("/submit_feedback", data={
+                "task_skill": "5",
+                "task_difficulty": "3",
+                "task_motivation": "6",
+                "strategy": "Ask focused questions",
+                "additional_feedback": "",
+            })
+            self.assertEqual(feedback.status_code, 302)
+            self.assertEqual(feedback.location, "/debriefing")
+
+        with server.app.app_context():
+            self.assertEqual(db.session.query(Participant).count(), 2)
+            self.assertEqual(db.session.query(ArchivedRoom).count(), 1)
+
+        first_redirect_time = "2026-01-01T10:02:00.000+00:00"
+        second_redirect_time = "2026-01-01T10:03:00.000+00:00"
+
+        with patch("server._utc_timestamp", side_effect=(first_redirect_time, second_redirect_time)), patch.dict(
+            server.app.config, {"PROLIFIC_COMPLETION_URL": "https://prolific.example/complete"},
+        ):
+            response = self.first.get("/complete-study")
+            self.assertEqual(response.status_code, 302)
+            self.assertEqual(response.location, "https://prolific.example/complete")
+            self.assertIsNone(room.get("completed_at"))
+            second_response = self.second.get("/complete-study")
+
+        self.assertEqual(second_response.status_code, 302)
+        first_state = server.study_sessions[first_study_session_id]
+        self.assertEqual(first_state["prolific_redirect_at"], first_redirect_time)
+        self.assertEqual(first_state["duration_seconds"], 120.0)
+        self.assertEqual(first_state["page_visits"][0]["exited_at"], first_redirect_time)
+        self.assertEqual(first_state["page_visits"][0]["duration_seconds"], 60.0)
+        second_state = server.study_sessions[second_study_session_id]
+        self.assertEqual(second_state["prolific_redirect_at"], second_redirect_time)
+        self.assertEqual(second_state["duration_seconds"], 180.0)
+        self.assertEqual(room["completed_at"], second_redirect_time)
+        self.assertEqual(room["participants_completed_at"]["first"], first_redirect_time)
+        self.assertEqual(room["participants_completed_at"]["second"], second_redirect_time)
+
+        with server.app.app_context():
+            first_record = db.session.get(Participant, first_study_session_id)
+            second_record = db.session.get(Participant, second_study_session_id)
+            archived_room = db.session.get(ArchivedRoom, room["archive_id"])
+            self.assertEqual(first_record.prolific_redirect_at, first_redirect_time)
+            self.assertEqual(first_record.duration_seconds, 120.0)
+            self.assertEqual(second_record.prolific_redirect_at, second_redirect_time)
+            self.assertEqual(second_record.duration_seconds, 180.0)
+            self.assertEqual(archived_room.completed_at, second_redirect_time)
+            first_final_visit = next(
+                visit for visit in first_record.page_visits if visit.page_name == "study-ended"
+            )
+            self.assertEqual(first_final_visit.exited_at, first_redirect_time)
+            self.assertEqual(first_final_visit.duration_seconds, 60.0)
 
     def test_interviewer_message_requires_valid_category_and_stores_it_privately(self):
         room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_message_turn()
@@ -674,14 +887,22 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(room["messages"][0]["id"], 1)
         self.assertEqual(room["messages"][0]["participant_id"], interviewee_id)
         self.assertEqual(room["messages"][0]["text"], f"I have visited {city_name} in the past three years.")
-        self.assertEqual(room["current_claim"], {
-            "city_id": city_id,
-            "truth_status": submission["answers"][city_id]["visited"] == "yes",
-            "dialogue_id": 1,  # The first shuffled claim is recorded as dialogue one.
-            "opening_message_id": 1,
-            "interviewer_question_count": 10,
-            "question_turns_ended": True,
-        })
+        self.assertEqual(room["current_claim"]["city_id"], city_id)
+        self.assertEqual(
+            room["current_claim"]["truth_status"],
+            submission["answers"][city_id]["visited"] == "yes",
+        )
+        self.assertEqual(room["current_claim"]["dialogue_id"], 1)
+        self.assertEqual(room["current_claim"]["opening_message_id"], 1)
+        self.assertEqual(room["current_claim"]["interviewer_question_count"], 10)
+        self.assertTrue(room["current_claim"]["question_turns_ended"])
+        self.assertIsNotNone(room["current_claim"]["started_at"])
+        self.assertIsNotNone(room["current_claim"]["conversation_ended_at"])
+        self.assertGreaterEqual(room["current_claim"]["dialogue_duration_seconds"], 0)
+        self.assertEqual(
+            room["current_claim"]["judgement_started_at"],
+            room["current_claim"]["conversation_ended_at"],
+        )
 
     def test_swapped_ids_and_new_session_cannot_claim_membership(self):
         self.pair()

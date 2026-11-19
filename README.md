@@ -4,7 +4,7 @@ Web interface for a game-based study collecting deceptive and truthful dialogues
 Two anonymous participants chat by text: an interviewer asks questions trying to
 determine credibility, the interviewee tries to convince them (truthfully or not).
 
-**Status:** Flask serves landing, consent, travel screening, a shared pre-match explanation, automatic matching, private role instructions, and chat. Both participants must explicitly select **I'm ready** before either can chat. Chat and eligible travel answers are held only in process memory, not persisted. Claim generation and dialogue progression are not implemented yet, even where described in the role instructions.
+**Status:** Flask serves the study flow, pairs participants, and enforces the dialogue protocol. Active rooms and chats remain in process memory, while completed study records are archived to the configured SQLite database when feedback is submitted. The browser does not receive private condition, correctness, or interviewer question-category data unless the protocol permits it.
 
 ## Requirements
 
@@ -177,11 +177,11 @@ live Cloudflare configuration, third-party widget accessibility, or production c
 
 ## Backend
 
-Flask serves the study pages and temporarily holds eligible screening submissions, their private room associations, room codes, participant roles, session-ownership tokens, readiness sets, and messages in memory. The browser polls Flask once per second for matching, chat availability after readiness, or new messages. Restarting the server clears this state. Production will need durable shared storage, participant authentication, and likely a real-time transport if lower latency is required. The chat is still a free-text prototype: claim generation, turn-order/question limits, judgements, and ten-dialogue progression are not implemented by this retention change.
+Flask serves the study pages and temporarily holds active screening submissions, private room associations, room codes, participant roles, session-ownership tokens, readiness sets, and live room state in memory. The browser polls Flask once per second for matching, chat availability after readiness, or new messages. Restarting the server clears active sessions. Completed study data is archived transactionally at feedback submission, and Prolific handoff times are recorded afterward. The app uses one Gunicorn worker because active rooms are in memory.
 
 ## Data collection
 
-Eligible travel records contain the validated visitation/familiarity values, screening version and server UTC ISO submission timestamp described above. Existing messages also have private server-generated UTC timestamps. These records are process-memory only and are lost on restart; there is no database, file persistence, export, claim generation or truth assignment yet. This step is not a durable research-data collection system.
+The TEST archive stores participant, room, screening, message, dialogue, page-visit, judgement, feedback, and server-side timing records. Active room state is still process-memory only, so a restart clears ongoing sessions; submitted records remain in the configured database. Export the archive to a private directory with `flask --app server export-study --output <private-directory>`. The command writes participant and room CSVs, JSON datasets, and one JSON file per room. Do not place exports under public static assets.
 
 ## Deployment
 
@@ -199,14 +199,20 @@ Git, screenshots and command history. The leading minus makes the file optional:
 without an explicit enable setting the feature remains **off**, not auto-enabled.
 Schedule activation outside participant sessions: restarting clears rooms and chats.
 
-Installing the updated unit requires a separate manual step on the server:
-`cp /var/www/study2/deploy/study2.service /etc/systemd/system/study2.service`, then
-`systemctl daemon-reload` and `systemctl restart study2.service`. Check
+The deployment script installs the unit and reloads systemd. For a manual unit edit,
+copy `deploy/study2.service` to `/etc/systemd/system/study2.service`, then run
+`systemctl daemon-reload` and restart the service. Check
 `systemctl status study2.service --no-pager` without dumping environment secrets.
-After later edits to the environment file, restart the service; after unit-file edits,
-run `daemon-reload` before restarting. [deploy.sh](deploy.sh) neither installs the unit
-nor runs `daemon-reload`; its ordinary application restart does not install these
-configuration changes. No production keys or configuration are supplied by this repo.
+After later edits to the environment file, restart the service. The unit labels stored study data as `test` and
+points SQLite to `/var/lib/study2/test/study2-test.sqlite`, outside the checkout. The
+deployment script creates this directory with `www-data` ownership, installs the unit,
+reloads systemd, and runs `flask db upgrade` against that explicit TEST path before
+restarting the app. Running locally without `STUDY_DATABASE_URL` uses ephemeral
+in-memory SQLite; it creates no persistent local database file. The database file is
+runtime data and is not committed. The initial schema is managed by Flask-Migrate, and
+valid feedback submissions archive completed room records to SQLite. Export the archive
+separately with the CLI described above. No production keys or configuration are supplied
+by this repo.
 
 First, test the change locally, then commit and push it to the `main` branch.
 From the repository root on your Mac, run:
@@ -216,8 +222,9 @@ sh deploy.sh
 ```
 
 The script connects to the VPS over SSH, pulls the latest changes in `/var/www/study2`,
-installs dependencies, builds the frontend, restarts `study2.service`, and displays
-its status. It stops if a command fails. SSH access to `root@157.90.127.76` is required;
+creates the private TEST database directory, installs the updated systemd unit and
+dependencies, builds the frontend, restarts `study2.service`, and displays its status.
+It stops if a command fails. SSH access to `root@157.90.127.76` is required;
 enter any SSH password or key passphrase directly in your terminal if prompted.
 Restarting clears all active rooms and chats. After deployment, check the site at
 <https://lpstudies.net>.

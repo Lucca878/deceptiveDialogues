@@ -16,11 +16,13 @@ class RoomMatchingTests(unittest.TestCase):
         with server.rooms_lock:
             server.rooms.clear()
             server.screening_submissions.clear()
+            server.study_sessions.clear()
 
     def tearDown(self):
         with server.rooms_lock:
             server.rooms.clear()
             server.screening_submissions.clear()
+            server.study_sessions.clear()
 
     def client(self):
         client = server.app.test_client()

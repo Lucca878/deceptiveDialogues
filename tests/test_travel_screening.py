@@ -66,11 +66,13 @@ class TravelScreeningTests(unittest.TestCase):
         with server.rooms_lock:
             server.rooms.clear()
             server.screening_submissions.clear()
+            server.study_sessions.clear()
 
     def tearDown(self):
         with server.rooms_lock:
             server.rooms.clear()
             server.screening_submissions.clear()
+            server.study_sessions.clear()
 
     def assert_redirect(self, response, path):
         self.assertEqual(response.status_code, 302)
@@ -130,7 +132,13 @@ class TravelScreeningTests(unittest.TestCase):
         self.begin_screening()
         self.assertEqual(self.client.get("/travel-cities").data, self.client.get("/travel-cities").data)
         with self.client.session_transaction() as browser_session:
-            self.assertEqual(dict(browser_session), {"consent_accepted": True, "travel_intro_seen": True})
+            self.assertEqual(
+                set(browser_session),
+                {"consent_accepted", "consent_accepted_at", "study_session_id", "study_started_at", "travel_intro_seen"},
+            )
+            self.assertEqual(len(browser_session["study_session_id"]), 32)
+            self.assertIsNotNone(datetime.fromisoformat(browser_session["study_started_at"]))
+            self.assertIsNotNone(datetime.fromisoformat(browser_session["consent_accepted_at"]))
 
     def test_consent_and_intro_are_required_for_get_post_and_all_gates(self):
         for method, path in (("GET", "/travel-intro"), ("POST", "/travel-intro"), ("GET", "/travel-cities"), ("POST", "/travel-cities")):
@@ -155,6 +163,11 @@ class TravelScreeningTests(unittest.TestCase):
                 self.assert_redirect(response, "/instructions" if eligible else "/screened-out-cities")
                 with self.client.session_transaction() as browser_session:
                     expected = {"consent_accepted": True, "travel_intro_seen": True}
+                    expected.update({
+                        "study_session_id": browser_session["study_session_id"],
+                        "study_started_at": browser_session["study_started_at"],
+                        "consent_accepted_at": browser_session["consent_accepted_at"],
+                    })
                     expected.update({"travel_screening_complete": server.SCREENING_VERSION} if eligible else {"travel_screened_out": True})
                     if eligible:
                         expected["screening_submission_id"] = browser_session["screening_submission_id"]
@@ -196,7 +209,10 @@ class TravelScreeningTests(unittest.TestCase):
                         checked = {entry["name"]: entry["value"] for entry in FormParser(response).inputs if "checked" in entry}
                         self.assertEqual(checked, {name: value for name, value in data.items() if name != key})
                         with self.client.session_transaction() as browser_session:
-                            self.assertEqual(dict(browser_session), {"consent_accepted": True, "travel_intro_seen": True})
+                            self.assertEqual(
+                                set(browser_session),
+                                {"consent_accepted", "consent_accepted_at", "study_session_id", "study_started_at", "travel_intro_seen"},
+                            )
                         self.assert_all_gates_blocked("/travel-intro")
                         self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/instructions")
 
@@ -258,8 +274,12 @@ class TravelScreeningTests(unittest.TestCase):
             "consent_accepted": True, "travel_intro_seen": True,
             "travel_screening_complete": server.SCREENING_VERSION,
             "screening_submission_id": submission_id,
+            "study_session_id": decoded["study_session_id"],
+            "study_started_at": decoded["study_started_at"],
+            "consent_accepted_at": decoded["consent_accepted_at"],
         })
-        self.assertNotIn(record["timestamp"], str(decoded))
+        # A consent timestamp is intentionally in the signed session; the screening record's timestamp key is not.
+        self.assertNotIn("timestamp", decoded)
         for city_id, _, _ in EXPECTED_CITIES:
             self.assertNotIn(city_id, str(decoded))
 
@@ -442,6 +462,7 @@ class TravelScreeningTests(unittest.TestCase):
                         "consent_accepted": True, "travel_intro_seen": True,
                         "travel_screening_complete": server.SCREENING_VERSION,
                         "screening_submission_id": browser_session["screening_submission_id"],
+                        "study_session_id": browser_session["study_session_id"],
                     })
                 self.assert_all_gates_blocked("/instructions")
 

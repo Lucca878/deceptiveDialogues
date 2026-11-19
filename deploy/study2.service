@@ -8,6 +8,9 @@ User=www-data
 Group=www-data
 WorkingDirectory=/var/www/study2
 Environment=PYTHONUNBUFFERED=1
+# Keep the live site's current collection explicitly labeled TEST in a persistent directory outside the checkout.
+Environment=STUDY_DATASET=test
+Environment=STUDY_DATABASE_URL=sqlite:////var/lib/study2/test/study2-test.sqlite
 EnvironmentFile=-/etc/study2.env
 ExecStart=/var/www/study2/.venv/bin/gunicorn --workers 1 --threads 4 --bind 127.0.0.1:8001 --access-logfile - --error-logfile - server:app
 Restart=on-failure

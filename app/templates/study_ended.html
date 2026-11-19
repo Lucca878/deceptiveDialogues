@@ -6,7 +6,7 @@
     <title>Study ended</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
     <!-- Give participants time to read before returning them automatically to Prolific. -->
-    <meta http-equiv="refresh" content="10;url={{ prolific_completion_url }}">
+    <meta http-equiv="refresh" content="10;url={{ completion_url }}">
 </head>
 <body>
   <main class="consent-page">
@@ -19,7 +19,7 @@
       </div>
       <!-- Offer a keyboard-accessible fallback if automatic navigation is unavailable. -->
       <div class="consent-actions">
-        <a class="button travel-primary" href="{{ prolific_completion_url }}">Return to Prolific</a>
+        <a class="button travel-primary" href="{{ completion_url }}">Return to Prolific</a>
       </div>
     </section>
   </main>

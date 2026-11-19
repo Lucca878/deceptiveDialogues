@@ -36,12 +36,14 @@ class HumanVerificationTests(unittest.TestCase):
         with server.rooms_lock:
             server.rooms.clear()
             server.screening_submissions.clear()
+            server.study_sessions.clear()
         self.addCleanup(self.clear_private_state)
 
     def clear_private_state(self):
         with server.rooms_lock:
             server.rooms.clear()
             server.screening_submissions.clear()
+            server.study_sessions.clear()
 
     def upstream(self, payload=None, raw=None):
         if raw is None:

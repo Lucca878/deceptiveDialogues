@@ -15,6 +15,9 @@ from random import sample, shuffle
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
 
+from app.database import db, migrate
+from app import database as _database_models  # Register tables so Flask-Migrate can inspect the complete schema.
+from app.study_data import archive_completed_room, record_prolific_handoff, register_study_data
 from city_candidates import CANDIDATE_CITIES
 
 app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
@@ -28,7 +31,16 @@ app.config.update(
     FLASK_SECRET_KEY=environ.get("FLASK_SECRET_KEY", "").strip(),
     # Keep the destination configurable so the approved Prolific completion URL can replace this temporary general link.
     PROLIFIC_COMPLETION_URL=environ.get("PROLIFIC_COMPLETION_URL", "https://www.prolific.com/").strip(),
+    # Label this initial archive as test data and permit an explicit VPS database URL override.
+    STUDY_DATASET=environ.get("STUDY_DATASET", "test").strip().lower() or "test",
+    # Local use is ephemeral; the VPS service explicitly supplies its persistent TEST database URL.
+    SQLALCHEMY_DATABASE_URI=environ.get("STUDY_DATABASE_URL", "sqlite:///:memory:"),
+    SQLALCHEMY_TRACK_MODIFICATIONS=False,
 )
+# Bind Flask-SQLAlchemy and Flask-Migrate after configuring the app; no tables or study rows are created yet.
+db.init_app(app)
+migrate.init_app(app, db)
+register_study_data(app)
 # A generated development key must never count as a configured verification key.
 app.config["SECRET_KEY"] = app.config["FLASK_SECRET_KEY"] or (
     None if app.config["TURNSTILE_ENABLED"] else token_hex(32)
@@ -38,11 +50,116 @@ rooms_lock = Lock()
 # Private eligible answers and room associations share rooms_lock. Never serialize
 # these records into a browser session, template, or API response.
 screening_submissions = {}
+# Keep page timing outside the signed browser cookie; this state will be archived at feedback submission.
+study_sessions = {}
+STUDY_PAGE_ENDPOINTS = {
+    "verify_human": "verification",
+    # Turnstile is optional; when enabled, its rendered challenge is part of verification duration.
+    "landing": "landing",
+    "consent": "consent",
+    "consent_decision": "consent-decision",
+    "travel_intro": "travel-intro",
+    "travel_cities": "travel-cities",
+    "instructions": "instructions",
+    "room": "room",
+    "role_instructions": "role-instructions",
+    "dialogue": "dialogue",
+    "feedback": "feedback",
+    "debriefing": "debriefing",
+    "study_ended": "study-ended",
+    "screened_out_cities": "screened-out",
+    "submit_feedback": "feedback",
+}
 ROOM_CODES = tuple(f"ROOM{number:02d}" for number in range(1, 10001))
 SCREENING_VERSION = "english-cities-v1"
 TURNSTILE_ACTION = "study-entry"
 TURNSTILE_TIMEOUT_SECONDS = 5
 TURNSTILE_MAX_RESPONSE_BYTES = 16384
+
+
+def _utc_timestamp():
+    """Return a server-generated UTC ISO timestamp for study events."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _ensure_study_session(started=False):
+    """Create an opaque study ID and remember its first Start-click timestamp."""
+    study_session_id = session.get("study_session_id")
+    if not isinstance(study_session_id, str) or not study_session_id:
+        study_session_id = token_hex(16)
+        session["study_session_id"] = study_session_id
+
+    if started and not session.get("study_started_at"):
+        session["study_started_at"] = _utc_timestamp()
+
+    with rooms_lock:
+        state = study_sessions.setdefault(study_session_id, {
+            "study_started_at": session.get("study_started_at"),
+            "consent_accepted": session.get("consent_accepted") is True,
+            "consent_accepted_at": session.get("consent_accepted_at"),
+            "entry_verified": _human_verified(),
+            "travel_intro_seen": session.get("travel_intro_seen") is True,
+            "travel_screened_out": session.get("travel_screened_out") is True,
+            "screening_complete_version": session.get("travel_screening_complete"),
+            "instructions_complete": session.get("instructions_complete") is True,
+            "page_visits": [],
+            "open_page_visit": None,
+        })
+        # A session cookie may outlive process memory; restore only its opaque ID and start timestamp.
+        if state.get("study_started_at") is None:
+            state["study_started_at"] = session.get("study_started_at")
+    return study_session_id
+
+
+def _update_study_session(study_session_id, **values):
+    """Update server-side study metadata without copying private credentials into the archive."""
+    if not study_session_id:
+        return
+    with rooms_lock:
+        state = study_sessions.get(study_session_id)
+        if state is not None:
+            state.update(values)
+
+
+def _close_open_page_visit(study_session_id, exited_at):
+    """Close the current page interval using a server timestamp, if one is open."""
+    with rooms_lock:
+        state = study_sessions.get(study_session_id)
+        visit = state.get("open_page_visit") if state else None
+        if not visit or visit.get("exited_at") is not None:
+            return
+        visit["exited_at"] = exited_at
+        entered_at = datetime.fromisoformat(visit["entered_at"])
+        exit_time = datetime.fromisoformat(exited_at)
+        visit["duration_seconds"] = max(0.0, (exit_time - entered_at).total_seconds())
+        state["open_page_visit"] = None
+
+
+def _record_page_visit(study_session_id, page_name, entered_at):
+    """Start a page visit and close the previous one at this server-observed transition."""
+    with rooms_lock:
+        state = study_sessions.setdefault(study_session_id, {
+            "study_started_at": session.get("study_started_at"),
+            "page_visits": [],
+            "open_page_visit": None,
+        })
+        previous = state.get("open_page_visit")
+        if previous and previous.get("exited_at") is None:
+            previous["exited_at"] = entered_at
+            entered_time = datetime.fromisoformat(previous["entered_at"])
+            exit_time = datetime.fromisoformat(entered_at)
+            previous["duration_seconds"] = max(0.0, (exit_time - entered_time).total_seconds())
+
+        visit = {
+            "sequence": len(state["page_visits"]) + 1,
+            "page_name": page_name,
+            "room_id": rooms.get(state.get("room_code"), {}).get("archive_id"),
+            "entered_at": entered_at,
+            "exited_at": None,
+            "duration_seconds": None,
+        }
+        state["page_visits"].append(visit)
+        state["open_page_visit"] = visit
 
 
 def _human_verification_configured(): # Returns True if human verification is properly configured.
@@ -109,6 +226,22 @@ def prevent_verification_caching(response): # Modify response headers to prevent
     return response
 
 
+@app.after_request
+def record_study_page_visit(response):
+    # Track rendered study pages only; frequent JSON room polling is not a page transition.
+    page_name = STUDY_PAGE_ENDPOINTS.get(request.endpoint)
+    if (
+        page_name is None
+        or response.mimetype != "text/html"
+        or 300 <= response.status_code < 400
+        or response.status_code >= 500
+    ):
+        return response
+    study_session_id = _ensure_study_session()
+    _record_page_visit(study_session_id, page_name, _utc_timestamp())
+    return response
+
+
 @app.route("/verify-human", methods=["GET", "POST"]) # Route for handling human verification page and form submission.
 def verify_human(): # Handles the human verification logic for GET and POST requests.
     if not app.config["TURNSTILE_ENABLED"]: # Redirect to landing page if Turnstile is not enabled.
@@ -155,6 +288,8 @@ def verify_human(): # Handles the human verification logic for GET and POST requ
                 ): # Check if verification succeeded and the action and hostname are valid.
                     session["human_verified"] = True # Mark the session as human-verified.
                     session["human_verification_config"] = _human_verification_fingerprint() # Store the human verification fingerprint in the session.
+                    _ensure_study_session()
+                    _update_study_session(session.get("study_session_id"), entry_verified=True)
                     return redirect(url_for("landing")) # Redirect to the landing page after successful verification.
                 error = "Verification was not successful. Please complete a new check and try again." # Set error message for failed verification.
                 status_code = 400 # Set HTTP status code for failed verification.
@@ -257,7 +392,6 @@ def _chat_ready(room):
         and all(pid in room["ready"] for pid in room["participants"])
     )
 
-
 def _dialogue_complete(room):
     """Called under rooms_lock; report completion without exposing the claim order."""
     if room["current_claim"] is not None:
@@ -307,6 +441,8 @@ def _acknowledge_transition(room, participant_id):
 
 @app.get("/")
 def landing():
+    # Create an opaque per-browser study reference so the landing visit can be timed without storing the cookie.
+    _ensure_study_session()
     return render_template("landing.html")
 
 
@@ -361,6 +497,8 @@ def dialogue():
                 or city_name is None
             ):
                 return "The dialogue claim could not be loaded. Please contact the researcher.", 409
+            # Use one server timestamp for the visible claim and the dialogue's start boundary.
+            claim_started_at = _utc_timestamp()
             # Construct the claim message based on the interviewee's answer and the city name.
             claim_message = {
                 "id": len(room["messages"]) + 1,
@@ -368,7 +506,7 @@ def dialogue():
                 "role": "interviewee",
                 "text": f"I have visited {city_name} in the past three years.",
                 "is_claim": True,
-                "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                "timestamp": claim_started_at,
             }
             # Append the claim message to the room's message list.
             room["messages"].append(claim_message)
@@ -376,9 +514,15 @@ def dialogue():
             # Add a server-side dialogue ID/index for this claim, based on the interviewee's saved shuffled order.
             room["current_claim"] = {
                 "city_id": next_city,
+                "claim_text": claim_message["text"],
                 "truth_status": answer["visited"] == "yes",
                 "dialogue_id": room["current_claim_index"]+1,
                 "opening_message_id": claim_message["id"],
+                "started_at": claim_started_at,
+                "conversation_ended_at": None,
+                "judgement_started_at": None,
+                "judgement_submitted_at": None,
+                "judgement_duration_seconds": None,
             }
             # Initialize the interviewer-question counter for this claim to zero. Store the count in this room's current_claim state, so it resets for each new claim.
             room["current_claim"]["interviewer_question_count"] = 0
@@ -452,10 +596,82 @@ def study_ended():
         # Disable caching so a stale final page does not linger after navigation.
         response = app.make_response(render_template(
             "study_ended.html",
-            prolific_completion_url=app.config["PROLIFIC_COMPLETION_URL"],
+            completion_url=url_for("complete_study"),
         ))
         response.headers["Cache-Control"] = "no-store" # Prevent caching of the final page
         return response
+
+
+@app.get("/complete-study")
+@consent_required
+@screening_required
+@instructions_required
+def complete_study():
+    # Revalidate completion on the server before recording the final redirect timestamp.
+    with rooms_lock:
+        room, participant_id = _bound_room(session.get("room_code", ""))
+        if room is None or room["participants"][participant_id] is None:
+            return redirect(url_for("room"))
+        if not _chat_ready(room):
+            return redirect(url_for("role_instructions"))
+        if not _dialogue_complete(room):
+            return redirect(url_for("dialogue"))
+        if participant_id not in room.get("feedback_submissions", {}):
+            return redirect(url_for("feedback"))
+
+        # Record when this app initiates the external handoff; Prolific's successful receipt is not observable here.
+        redirect_at = session.get("prolific_redirect_at") or _utc_timestamp()
+        study_session_id = session.get("study_session_id", "")
+        state = study_sessions.get(study_session_id)
+        if state is not None:
+            started_at = state.get("study_started_at")
+            duration_seconds = None
+            if started_at:
+                duration_seconds = max(
+                    0.0,
+                    (datetime.fromisoformat(redirect_at) - datetime.fromisoformat(started_at)).total_seconds(),
+                )
+            participants_completed_at = room.setdefault("participants_completed_at", {})
+            previous_redirect_at = participants_completed_at.get(participant_id)
+            if previous_redirect_at is None:
+                participants_completed_at[participant_id] = redirect_at
+            room_completed_at = room.get("completed_at")
+            if room_completed_at is None and set(participants_completed_at) >= set(room["participants"]):
+                room_completed_at = redirect_at
+            page_visits = [dict(visit) for visit in state.get("page_visits", [])]
+            if page_visits and page_visits[-1].get("exited_at") is None:
+                final_visit = page_visits[-1]
+                final_visit["exited_at"] = redirect_at
+                entered_at = datetime.fromisoformat(final_visit["entered_at"])
+                exited_at = datetime.fromisoformat(redirect_at)
+                final_visit["duration_seconds"] = max(
+                    0.0, (exited_at - entered_at).total_seconds(),
+                )
+
+            if not record_prolific_handoff(
+                study_session_id=study_session_id,
+                room_id=room["archive_id"],
+                redirect_at=previous_redirect_at or redirect_at,
+                duration_seconds=duration_seconds,
+                page_visits=page_visits,
+                room_completed_at=room_completed_at,
+            ):
+                # Do not send the participant away when the final timestamp could not be saved; they can retry.
+                return "Could not save your completion time. Please try again.", 503
+
+            session["prolific_redirect_at"] = previous_redirect_at or redirect_at
+            state["prolific_redirect_at"] = previous_redirect_at or redirect_at
+            state["duration_seconds"] = duration_seconds
+            if room_completed_at is not None:
+                room["completed_at"] = room_completed_at
+        else:
+            return "Could not save your completion time. Please try again.", 503
+
+    # The final study page has remained open until this same-origin redirect request.
+    final_redirect_at = session["prolific_redirect_at"]
+    _close_open_page_visit(study_session_id, final_redirect_at)
+    # Redirect using only the server-configured destination, never a browser-provided URL.
+    return redirect(app.config["PROLIFIC_COMPLETION_URL"])
 
 
 @app.post("/submit_feedback")
@@ -508,15 +724,36 @@ def submit_feedback():
             response.headers["Cache-Control"] = "no-store"
             return response
 
-        # Save only this participant's feedback, with a server-generated timestamp, in room memory.
-        room.setdefault("feedback_submissions", {})[participant_id] = {
+        # Prepare the participant's validated feedback using a server-generated timestamp.
+        feedback_record = {
             "task_skill": int(values["task_skill"]),
             "task_difficulty": int(values["task_difficulty"]),
             "task_motivation": int(values["task_motivation"]),
             "strategy": values["strategy"].strip(),
             "additional_feedback": values["additional_feedback"],
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "timestamp": _utc_timestamp(),
         }
+        # Commit the whole server-owned participant/room snapshot before acknowledging this submission.
+        room.setdefault("feedback_submissions", {})[participant_id] = feedback_record
+        if not archive_completed_room(
+            room_code=room_code,
+            room_state=room,
+            study_sessions=study_sessions,
+            screening_submissions=screening_submissions,
+            feedback_participant_id=participant_id,
+            feedback_record=feedback_record,
+        ):
+            # Keep the response retryable if persistence failed; do not claim that feedback was saved.
+            room["feedback_submissions"].pop(participant_id, None)
+            response = app.make_response(render_template(
+                "feedback.html",
+                submitted=False,
+                errors={"database": "We could not securely save your feedback. Please try again."},
+                values=values,
+            ))
+            response.status_code = 503
+            response.headers["Cache-Control"] = "no-store"
+            return response
     # Use Post/Redirect/Get so refreshing the confirmation page does not resubmit the form.
     return redirect(url_for("debriefing"))
 
@@ -531,6 +768,8 @@ def room():
 
 @app.get("/consent")
 def consent():
+    # Ensure direct consent links still receive a pseudonymous study ID for later page timing.
+    _ensure_study_session()
     if session.get("consent_accepted") is True:
         if _screening_complete() and session.get("travel_screened_out") is not True:
             return redirect(url_for("instructions"))
@@ -540,6 +779,9 @@ def consent():
 
 @app.get("/start")
 def start_study():
+    # Preserve the first server timestamp for the participant's Start-the-study click.
+    study_session_id = _ensure_study_session(started=True)
+    _close_open_page_visit(study_session_id, session["study_started_at"])
     return redirect(url_for("consent")) # redirect to consent page
 
 
@@ -552,11 +794,25 @@ def consent_decision():
     session.pop("other_city_ids", None)
     session.pop("other_cities_complete", None)
     if decision == "accept":
+        # Ensure a direct consent POST still has a server-timed study start.
+        _ensure_study_session(started=True)
         session["consent_accepted"] = True
+        session.setdefault("consent_accepted_at", _utc_timestamp())
+        _update_study_session(
+            session.get("study_session_id"),
+            consent_accepted=True,
+            consent_accepted_at=session["consent_accepted_at"],
+        )
         if _screening_complete() and session.get("travel_screened_out") is not True:
             return redirect(url_for("instructions"))
         return redirect(url_for("travel_intro"))
     session.pop("consent_accepted", None)
+    session.pop("consent_accepted_at", None)
+    _update_study_session(
+        session.get("study_session_id"),
+        consent_accepted=False,
+        consent_accepted_at=None,
+    )
     return render_template("no_consent.html")
 
 
@@ -578,6 +834,7 @@ def begin_travel_screening():
     if _screening_complete():
         return redirect(url_for("instructions"))
     session["travel_intro_seen"] = True
+    _update_study_session(session.get("study_session_id"), travel_intro_seen=True)
     return redirect(url_for("travel_cities"))
 
 
@@ -643,9 +900,19 @@ def travel_cities():
                         bound_room["screening_submission_ids"][participant_id] = submission_id
                     session["screening_submission_id"] = submission_id
                 session["travel_screening_complete"] = SCREENING_VERSION
+                _update_study_session(
+                    session.get("study_session_id"),
+                    screening_complete_version=SCREENING_VERSION,
+                    travel_screened_out=False,
+                )
                 return redirect(url_for("instructions"))
             session.pop("travel_screening_complete", None)
             session["travel_screened_out"] = True
+            _update_study_session(
+                session.get("study_session_id"),
+                screening_complete_version=None,
+                travel_screened_out=True,
+            )
             return redirect(url_for("screened_out_cities"))
 
     return render_template("travel_cities.html", cities=CANDIDATE_CITIES, values=values, errors=errors), 400 if errors else 200
@@ -665,6 +932,7 @@ def instructions():
 @screening_required
 def continue_to_matching():
     session["instructions_complete"] = True
+    _update_study_session(session.get("study_session_id"), instructions_complete=True)
     return redirect(url_for("room"))
 
 
@@ -687,6 +955,8 @@ def role_instructions():
             room["ready"].add(participant_id)
             return redirect(url_for("role_instructions"))
         if _chat_ready(room):
+            # Start the room timeline when both participants are ready to enter the shared chat.
+            room.setdefault("chat_started_at", _utc_timestamp())
             return redirect(url_for("dialogue"))
         response = app.make_response(render_template(
             "role_instructions.html",
@@ -739,13 +1009,19 @@ def match_room(): # Handles the API request to match a participant to a room
                 return jsonify(error="All rooms are currently occupied."), 409
             token = token_hex(32)
             # Add a room field for the next allowed speaker; initialize it to None until the claim exists.
-            rooms[code] = {"participants": {participant_id: None}, "messages": [], "typing": {}, "ready": set(), "owners": {participant_id: token}, "current_claim": None, "current_claim_index": 0, "next_speaker": None}
+            rooms[code] = {"archive_id": token_hex(16), "created_at": _utc_timestamp(), "participants": {participant_id: None}, "messages": [], "dialogues": [], "typing": {}, "ready": set(), "owners": {participant_id: token}, "study_session_ids": {participant_id: session.get("study_session_id", "")}, "current_claim": None, "current_claim_index": 0, "next_speaker": None}
             rooms[code]["screening_submission_ids"] = {participant_id: session["screening_submission_id"]} # Store the screening submission ID for the participant in the room; for creating a new room.
             session.update(room_code=code, room_participant_id=participant_id, room_token=token)
+            study_state = study_sessions.get(session.get("study_session_id", ""))
+            if study_state is not None:
+                study_state.update(room_code=code, participant_id=participant_id)
+                if study_state.get("open_page_visit"):
+                    study_state["open_page_visit"]["room_id"] = rooms[code]["archive_id"]
             return jsonify(code=code, status="waiting")
 
         token = token_hex(32)
         rooms[code]["owners"][participant_id] = token
+        rooms[code].setdefault("study_session_ids", {})[participant_id] = session.get("study_session_id", "")
         rooms[code]["screening_submission_ids"][participant_id] = session["screening_submission_id"] # Store the screening submission ID for the participant in the room; if room exists, update it with the new participant's ID.
         session.update(room_code=code, room_participant_id=participant_id, room_token=token)
         participants = rooms[code]["participants"] # Get the dictionary of participants for the current room
@@ -754,6 +1030,15 @@ def match_room(): # Handles the API request to match a participant to a room
         if choice((True, False)):
             roles.reverse()
         participants.update(zip(participants, roles)) # Assign roles to participants in the room, pairing them with the available roles
+        rooms[code]["paired_at"] = _utc_timestamp()
+        for paired_participant_id in participants:
+            study_state = study_sessions.get(
+                rooms[code]["study_session_ids"].get(paired_participant_id, ""),
+            )
+            if study_state is not None:
+                study_state.update(room_code=code, participant_id=paired_participant_id)
+                if study_state.get("open_page_visit"):
+                    study_state["open_page_visit"]["room_id"] = rooms[code]["archive_id"]
         # Find the participant who was assigned the interviewer role.
         interviewer_id = next(
             pid for pid, role in participants.items() if role == "interviewer"
@@ -829,7 +1114,7 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             "participant_id": participant_id,
             "role": role,
             "text": text,
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "timestamp": _utc_timestamp(),
         }
         if role == "interviewer":
             message["question_type"] = question_type
@@ -840,6 +1125,16 @@ def send_room_message(code): # Handles sending a message to a specific room by a
         # When question 10 is asked, still allow the interviewee's tenth answer; after that answer, end question turns for this claim.
         if room["current_claim"]["interviewer_question_count"] >= 10 and role == "interviewee":
             room["current_claim"]["question_turns_ended"] = True
+            # End conversation timing at the server's acceptance of the tenth answer.
+            room["current_claim"]["conversation_ended_at"] = message["timestamp"]
+            dialogue_started_at = room["current_claim"].get("started_at")
+            if dialogue_started_at:
+                room["current_claim"]["dialogue_duration_seconds"] = max(
+                    0.0,
+                    (datetime.fromisoformat(message["timestamp"]) - datetime.fromisoformat(dialogue_started_at)).total_seconds(),
+                )
+            # Judgement timing starts at the same boundary and runs through any feedback shown before Continue.
+            room["current_claim"]["judgement_started_at"] = message["timestamp"]
         if room["current_claim"].get("question_turns_ended"):
             room["next_speaker"] = None
         else:
@@ -878,11 +1173,16 @@ def submit_judgement(code):
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not (0 <= confidence <= 100):
             return jsonify(error="Confidence must be a number between 0 and 100."), 400
 
+        judgement_submitted_at = _utc_timestamp()
+        truth_status = room["current_claim"].get("truth_status")
+        correct = ((judgement == "true") == truth_status)
         room["current_claim"]["judgement"] = {
             "judgement": judgement,
             "confidence": confidence,
-            "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "correct": correct,
+            "timestamp": judgement_submitted_at,
         }
+        room["current_claim"]["judgement_submitted_at"] = judgement_submitted_at
         # only when this room's assigned interviewer is in the feedback condition; never expose it to control.
         # Determine if the current interviewer is in the feedback condition
         interviewer_id = next(
@@ -890,8 +1190,6 @@ def submit_judgement(code):
         )
         condition = room.get("conditions", {}).get(interviewer_id)
         if condition == "feedback":
-            truth_status = room["current_claim"].get("truth_status")
-            correct = ((judgement == "true") == truth_status)
             return jsonify(status="ok", correct=correct), 201
         else:
             return jsonify(status="ok"), 201
@@ -922,6 +1220,37 @@ def continue_claim(code):
             return jsonify(error="A judgement must be submitted before continuing."), 403
         if room.get("transition_end") is not None:
             return jsonify(error="The next dialogue transition is already in progress."), 409
+
+        # End judgement timing on the interviewer's Continue click, including any feedback wait.
+        judgement_ended_at = _utc_timestamp()
+        judgement_started_at = room["current_claim"].get("judgement_started_at")
+        if judgement_started_at:
+            room["current_claim"]["judgement_ended_at"] = judgement_ended_at
+            room["current_claim"]["judgement_duration_seconds"] = max(
+                0.0,
+                (datetime.fromisoformat(judgement_ended_at) - datetime.fromisoformat(judgement_started_at)).total_seconds(),
+            )
+
+        # Preserve the completed dialogue in the room snapshot before transition advancement clears current_claim.
+        current_claim = room["current_claim"]
+        judgement_record = current_claim["judgement"]
+        conversation_ended_at = current_claim.get("conversation_ended_at")
+        conversation_started_at = current_claim.get("started_at")
+        room.setdefault("dialogues", []).append({
+            "dialogue_number": current_claim["dialogue_id"],
+            "city_id": current_claim["city_id"],
+            "claim_text": current_claim.get("claim_text", ""),
+            "truth_status": current_claim["truth_status"],
+            "started_at": conversation_started_at,
+            "conversation_ended_at": conversation_ended_at,
+            "dialogue_duration_seconds": current_claim.get("dialogue_duration_seconds", 0.0),
+            "judgement": judgement_record["judgement"],
+            "confidence": judgement_record["confidence"],
+            "correct": judgement_record["correct"],
+            "judgement_submitted_at": current_claim.get("judgement_submitted_at"),
+            "judgement_ended_at": current_claim.get("judgement_ended_at"),
+            "judgement_duration_seconds": current_claim.get("judgement_duration_seconds", 0.0),
+        })
 
         # Start a server-timed 3-second transition on this valid Continue click; keep the current claim until the countdown expires. We need to store the transition deadline in the room.
         transition_start = monotonic() # Record the start time of the transition

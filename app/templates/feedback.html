@@ -15,7 +15,13 @@
             <!-- Confirm completion without presenting a second editable copy of saved responses. -->
             <p role="status" class="travel-lead">Your feedback has been submitted. Thank you for taking part.</p>
             {% else %}
-            {% if errors %}<p role="alert" class="field-error">Please correct the highlighted answers and submit again.</p>{% endif %}
+            {% if errors %}
+            {% if errors.get('database') %}
+            <p role="alert" class="field-error">{{ errors.get('database') }}</p>
+            {% else %}
+            <p role="alert" class="field-error">Please correct the highlighted answers and submit again.</p>
+            {% endif %}
+            {% endif %}
             <form class="travel-fields" action="{{ url_for('submit_feedback') }}" method="post">
                 <fieldset class="travel-field familiarity-field" aria-describedby="task-skill-scale-help task-skill-error">
                     <legend>Do you think you were good at the task?</legend>
