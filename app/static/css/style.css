@@ -1236,8 +1236,8 @@ h1 {
 }
 
 #question-type {
-  flex: 0 1 12rem;
-  min-width: 10rem;
+  width: 100%;
+  min-width: 0;
   min-height: 2.9rem;
   padding: 0.65rem 0.75rem;
   border: 1px solid #b9c1cb;
@@ -1248,11 +1248,10 @@ h1 {
   font-size: 0.9rem;
 }
 
-#chat-form > label[for="question-type"] {
-  align-self: center;
-  color: var(--ink);
-  font-size: 0.875rem;
-  font-weight: 500;
+/* Keep the category stage in the composer space while its shared Send button becomes the confirmation button. */
+.question-type-step {
+  flex: 1;
+  min-width: 0;
 }
 
 .chat-composer > input:focus-visible,
@@ -1539,14 +1538,12 @@ h1 {
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  #chat-form > label[for="question-type"],
-  #question-type {
+  #question-type-step {
     grid-column: 1 / -1;
   }
 
-  #question-type {
-    width: 100%;
-    min-width: 0;
+  #chat-form > .chat-send {
+    grid-column: 2;
   }
 
   .room-join {

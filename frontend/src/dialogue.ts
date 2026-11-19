@@ -64,7 +64,8 @@ const mazeControls = role === "interviewee"
   : []; // Direction buttons are omitted from the interviewer page.
 const roomCode = sessionStorage.getItem("chat-room-code"); // Active chat room code
 const participantId = sessionStorage.getItem("participant-id"); // Unique identifier for the participant
-const questionTypeSelect = document.querySelector<HTMLSelectElement>("#question-type"); //  Question type select element
+const questionTypeStep = document.querySelector<HTMLDivElement>("#question-type-step"); // Second composer stage shown after Send is selected
+const questionTypeSelect = document.querySelector<HTMLSelectElement>("#question-type"); // Interviewer-only question category selector
 if (
   (role !== "interviewer" && role !== "interviewee") ||
   !roomCode ||
@@ -80,6 +81,8 @@ if (
   let openingClaimReceived = false; // Flag indicating whether the opening claim from the interviewee has been received
   // Track the server's can_send value and use it to enable/disable both composer controls.
   let canSend = false; // Flag indicating whether the server allows this participant to send messages
+  let selectingQuestionType = false; // Tracks whether the interviewer is confirming a category for a drafted question.
+  let messageRequestPending = false; // Prevents duplicate message submissions while the server is processing one.
   const renderedMessageIds = new Set<number>(); // Set of message IDs that have already been rendered to avoid duplicates
   const mazeSize = 9; // Increase the optional client-only maze to make routes less predictable.
   const minimumMazePathLength = 24; // Reject layouts with a short, obvious route to the exit.
@@ -357,8 +360,11 @@ if (
         lastMessageId = Math.max(lastMessageId, message.id);
         renderMessage(message); // Render the new message in the chat UI
       }
-      input.disabled = !canSend || !openingClaimReceived;
-      sendButton.disabled = !canSend || !openingClaimReceived;
+      input.disabled = selectingQuestionType || !canSend || !openingClaimReceived;
+      sendButton.disabled = messageRequestPending || !canSend || !openingClaimReceived;
+      if (questionTypeSelect) {
+        questionTypeSelect.disabled = !selectingQuestionType || messageRequestPending || !canSend;
+      }
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Could not load messages."); // Log any errors encountered during message polling
     } finally {
@@ -492,17 +498,40 @@ if (
   form.addEventListener("submit", (event) => {
     event.preventDefault(); // Prevent the default form submission behavior
 
-    if (!openingClaimReceived) return;
+    if (!openingClaimReceived || messageRequestPending) return;
     const text = input.value.trim(); // Get the trimmed text from the input field
     if (!text) return; // Do nothing if the input is empty
-    input.value = ""; // Clear the input field
-    input.disabled = true; // Disable the input field while sending the message
+    if (questionTypeSelect && questionTypeStep && !selectingQuestionType) {
+      // Preserve the draft and request its category before sending it to the server.
+      selectingQuestionType = true;
+      input.hidden = true;
+      input.disabled = true;
+      questionTypeStep.hidden = false;
+      questionTypeSelect.disabled = false;
+      sendButton.textContent = "Submit question type";
+      questionTypeSelect.focus();
+      return;
+    }
+
+    const questionType = questionTypeSelect?.value;
+    if (questionTypeSelect && !questionType) {
+      questionTypeSelect.reportValidity();
+      return;
+    }
+
+    messageRequestPending = true;
+    input.disabled = true;
     sendButton.disabled = true;
+    if (questionTypeSelect) questionTypeSelect.disabled = true;
 
     void fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/messages`, { // Send a new message to the server
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ participant_id: activeParticipantId, text, question_type: questionTypeSelect?.value }),
+      body: JSON.stringify({
+        participant_id: activeParticipantId,
+        text,
+        ...(questionTypeSelect ? { question_type: questionType } : {}),
+      }),
     }) // Handle the server response for the new message
       .then(async (response) => { // Process the server response for the new message
         const data = await response.json() as {
@@ -518,17 +547,32 @@ if (
         if (!response.ok || !data.message) throw new Error(data.error ?? "Could not send message."); // Throw an error if the message could not be sent
         canSend = false; // The server has switched the turn; wait for polling to confirm the next permission
         renderMessage(data.message); // Render the newly sent message in the chat UI
-        if (questionTypeSelect) questionTypeSelect.value = ""; // Reset the question type select after a successful send
+        input.value = ""; // Clear the draft only after the server accepts the message.
+        if (questionTypeSelect && questionTypeStep) {
+          questionTypeSelect.value = ""; // Reset the category for the next interviewer question.
+          questionTypeSelect.disabled = true;
+          questionTypeStep.hidden = true;
+          selectingQuestionType = false;
+          input.hidden = false;
+          sendButton.textContent = "Send";
+        }
       })
       .catch((error: unknown) => {
-        input.value = text;
         console.error(error instanceof Error ? error.message : "Could not send message."); // Log any errors encountered while sending the message
       })
       .finally(() => {
-        // Keep the composer disabled after sending until polling says this participant's turn is active again.
-        input.disabled = !canSend || !openingClaimReceived;
+        // Keep controls disabled until both the request and server turn state allow another message.
+        messageRequestPending = false;
+        input.disabled = selectingQuestionType || !canSend || !openingClaimReceived;
         sendButton.disabled = !canSend || !openingClaimReceived;
-        if (openingClaimReceived) input.focus(); // Focus the input field after sending a message
+        if (questionTypeSelect) {
+          questionTypeSelect.disabled = !selectingQuestionType || !canSend;
+        }
+        if (selectingQuestionType) {
+          questionTypeSelect?.focus(); // Return focus to the category control if submission failed.
+        } else if (openingClaimReceived) {
+          input.focus(); // Return focus to the message field after the composer is restored.
+        }
       });
   }); // Handle the form submission for sending a new message
 }
