@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Study ended</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <!-- Give participants time to read before returning them automatically to Prolific. -->
+    <meta http-equiv="refresh" content="10;url={{ prolific_completion_url }}">
+</head>
+<body>
+  <main class="consent-page">
+    <section class="consent-card" aria-labelledby="study-ended-title">
+      <p class="room-eyebrow">THE DECEPTION GAME</p>
+      <h1 id="study-ended-title">Study ended</h1>
+      <div class="consent-content">
+        <p>Thank you for taking part in this study. You will be redirected to Prolific in a few seconds.</p>
+        <p>If you are not redirected, select the button below to return to Prolific.</p>
+      </div>
+      <!-- Offer a keyboard-accessible fallback if automatic navigation is unavailable. -->
+      <div class="consent-actions">
+        <a class="button travel-primary" href="{{ prolific_completion_url }}">Return to Prolific</a>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

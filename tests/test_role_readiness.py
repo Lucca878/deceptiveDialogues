@@ -142,7 +142,7 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertIn(b'value="4" checked', response.data)
         self.assertEqual(room.get("feedback_submissions", {}), {})
 
-    def test_feedback_saves_once_in_memory_and_shows_completion(self):
+    def test_feedback_saves_once_in_memory_and_redirects_to_debriefing(self):
         room = self.complete_dialogues()
         response = self.first.post("/submit_feedback", data={
             "task_skill": "6",
@@ -153,7 +153,7 @@ class RoleReadinessTests(unittest.TestCase):
         })
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.location, "/feedback")
+        self.assertEqual(response.location, "/debriefing")
         saved = room["feedback_submissions"]["first"]
         self.assertEqual(saved["task_skill"], 6)
         self.assertEqual(saved["task_difficulty"], 2)
@@ -170,13 +170,62 @@ class RoleReadinessTests(unittest.TestCase):
             "additional_feedback": "Changed note",
         })
         self.assertEqual(duplicate.status_code, 302)
-        self.assertEqual(duplicate.location, "/feedback")
+        self.assertEqual(duplicate.location, "/debriefing")
         self.assertEqual(room["feedback_submissions"]["first"], saved)
 
-        confirmation = self.first.get("/feedback")
-        self.assertEqual(confirmation.status_code, 200)
-        self.assertIn(b"Your feedback has been submitted.", confirmation.data)
-        self.assertNotIn(b'action="/submit_feedback"', confirmation.data)
+    def test_debriefing_requires_completed_dialogues_and_feedback(self):
+        # A participant cannot open debriefing before both members are ready.
+        self.pair()
+        room = server.rooms["ROOM01"]
+        self.assertEqual(self.first.get("/debriefing").location, "/role-instructions")
+
+        # Readiness alone does not bypass the server-owned dialogue completion check.
+        room["ready"].update(room["participants"])
+        self.assertEqual(self.first.get("/debriefing").location, "/dialogue")
+
+        # Completing all ten dialogues still requires this participant's saved feedback.
+        room["current_claim_index"] = 10
+        room["current_claim"] = None
+        room["next_speaker"] = None
+        self.assertEqual(self.first.get("/debriefing").location, "/feedback")
+
+        # Saved feedback grants access to the uncached debriefing and its guarded next-step link.
+        room["feedback_submissions"] = {"first": {"timestamp": "server timestamp"}}
+        response = self.first.get("/debriefing")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertIn(b'href="/study-ended"', response.data)
+
+    def test_study_ended_requires_completion_and_renders_prolific_fallback(self):
+        # Consent remains required even for a request to the final completion page.
+        unconsented = server.app.test_client()
+        self.assertEqual(unconsented.get("/study-ended").location, "/consent")
+
+        # A valid participant without a paired room must return to matching first.
+        self.assertEqual(self.first.get("/study-ended").location, "/room")
+        self.pair()
+        room = server.rooms["ROOM01"]
+        self.assertEqual(self.first.get("/study-ended").location, "/role-instructions")
+
+        # Both participants must be ready and all ten dialogues must be complete.
+        room["ready"].update(room["participants"])
+        self.assertEqual(self.first.get("/study-ended").location, "/dialogue")
+        room["current_claim_index"] = 10
+        room["current_claim"] = None
+        room["next_speaker"] = None
+        self.assertEqual(self.first.get("/study-ended").location, "/feedback")
+
+        # The configured destination is used for both automatic navigation and the manual fallback.
+        room["feedback_submissions"] = {"first": {"timestamp": "server timestamp"}}
+        destination = "https://app.prolific.com/submissions/complete?cc=TEST123"
+        with patch.dict(server.app.config, {"PROLIFIC_COMPLETION_URL": destination}):
+            response = self.first.get("/study-ended")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertIn(b"You will be redirected to Prolific", response.data)
+        self.assertIn(f'href="{destination}"'.encode(), response.data)
+        self.assertIn(f'content="10;url={destination}"'.encode(), response.data)
 
     def test_message_poll_only_returns_messages_from_active_dialogue(self):
         self.pair()

@@ -26,6 +26,8 @@ app.config.update(
         host.strip() for host in environ.get("TURNSTILE_HOSTNAMES", "").split(",") if host.strip()
     })),
     FLASK_SECRET_KEY=environ.get("FLASK_SECRET_KEY", "").strip(),
+    # Keep the destination configurable so the approved Prolific completion URL can replace this temporary general link.
+    PROLIFIC_COMPLETION_URL=environ.get("PROLIFIC_COMPLETION_URL", "https://www.prolific.com/").strip(),
 )
 # A generated development key must never count as a configured verification key.
 app.config["SECRET_KEY"] = app.config["FLASK_SECRET_KEY"] or (
@@ -390,6 +392,27 @@ def dialogue():
         return render_template("dialogue.html", role=room["participants"][participant_id])
 
 
+@app.get("/debriefing")
+@consent_required
+@screening_required
+@instructions_required
+def debriefing():
+    with rooms_lock:
+        room, participant_id = _bound_room(session.get("room_code", ""))
+        if room is None or room["participants"][participant_id] is None:
+            return redirect(url_for("room"))
+        if not _chat_ready(room):
+            return redirect(url_for("role_instructions"))
+        if not _dialogue_complete(room):
+            return redirect(url_for("dialogue"))
+        if participant_id not in room.get("feedback_submissions", {}):
+            return redirect(url_for("feedback"))
+        _acknowledge_transition(room, participant_id)
+        response = app.make_response(render_template("debriefing.html"))
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+
 @app.get("/feedback")
 @consent_required
 @screening_required
@@ -408,6 +431,30 @@ def feedback():
         submitted = participant_id in room.get("feedback_submissions", {})
         response = app.make_response(render_template("feedback.html", submitted=submitted))
         response.headers["Cache-Control"] = "no-store"
+        return response
+
+@app.get("/study-ended")
+@consent_required
+@screening_required
+@instructions_required
+def study_ended():
+    # Recheck the participant's server-owned room and completion state before showing the final destination.
+    with rooms_lock:
+        room, participant_id = _bound_room(session.get("room_code", ""))
+        if room is None or room["participants"][participant_id] is None:
+            return redirect(url_for("room"))
+        if not _chat_ready(room):
+            return redirect(url_for("role_instructions"))
+        if not _dialogue_complete(room):
+            return redirect(url_for("dialogue"))
+        if participant_id not in room.get("feedback_submissions", {}):
+            return redirect(url_for("feedback"))
+        # Disable caching so a stale final page does not linger after navigation.
+        response = app.make_response(render_template(
+            "study_ended.html",
+            prolific_completion_url=app.config["PROLIFIC_COMPLETION_URL"],
+        ))
+        response.headers["Cache-Control"] = "no-store" # Prevent caching of the final page
         return response
 
 
@@ -438,7 +485,7 @@ def submit_feedback():
             return redirect(url_for("dialogue"))
         # Preserve the first saved form response; refreshes or repeated POSTs cannot overwrite it.
         if participant_id in room.get("feedback_submissions", {}):
-            return redirect(url_for("feedback"))
+            return redirect(url_for("debriefing"))
 
         # Each required rating must be exactly one value from the seven-point scale.
         for field in ("task_skill", "task_difficulty", "task_motivation"):
@@ -470,9 +517,8 @@ def submit_feedback():
             "additional_feedback": values["additional_feedback"],
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }
-
     # Use Post/Redirect/Get so refreshing the confirmation page does not resubmit the form.
-    return redirect(url_for("feedback"))
+    return redirect(url_for("debriefing"))
 
 
 @app.get("/room")
