@@ -430,26 +430,31 @@ if (
           body: JSON.stringify({ participant_id: activeParticipantId, judgement: truth, confidence: Number(confidence) }),
         });
         if (!response.ok) throw new Error("Could not submit judgement.");
+        // Read the one-time response body once; correctness is present only in the feedback condition.
         const result = await response.json() as { correct?: boolean };
         if (judgementStatus) {
           if (typeof result.correct === "boolean") {
+            // Show accuracy feedback and wait for the interviewer to choose Continue.
             judgementStatus.textContent = result.correct
               ? "Your judgement was correct"
               : "Your judgement was incorrect";
             judgementStatus.classList.toggle("judgement-status--correct", result.correct);
             judgementStatus.classList.toggle("judgement-status--incorrect", !result.correct);
             judgementStatus.hidden = false;
-            judgementFields.hidden = true; // Show feedback in place of the submitted judgement controls.
+            judgementFields.hidden = true;
             if (judgementFeedback) {
-              judgementFeedback.hidden = false; // Reveal the container holding both feedback and Continue.
+              judgementFeedback.hidden = false;
             }
             if (continueButton) {
               continueButton.hidden = false;
-              continueButton.focus(); // Move keyboard focus to the next available action.
+              continueButton.focus();
             }
           } else {
+            // Control receives no correctness; hide the result and start the same shared countdown immediately.
             judgementStatus.textContent = "";
             judgementStatus.hidden = true;
+            judgementFields.hidden = true;
+            await continueToNextClaim();
           }
         }
       } catch (error) {

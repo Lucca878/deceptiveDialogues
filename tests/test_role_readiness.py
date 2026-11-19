@@ -48,6 +48,31 @@ class RoleReadinessTests(unittest.TestCase):
         room["next_speaker"] = None
         return room
 
+    def prepare_judgement(self, condition):
+        """Prepare a ready pair with a claim awaiting the interviewer's judgement."""
+        self.pair()
+        room = server.rooms["ROOM01"]
+        room["ready"].update(room["participants"])
+        interviewer_id = next(
+            pid for pid, role in room["participants"].items() if role == "interviewer"
+        )
+        interviewee_id = next(
+            pid for pid, role in room["participants"].items() if role == "interviewee"
+        )
+        clients = {"first": self.first, "second": self.second}
+        room["conditions"] = {interviewer_id: condition}
+        room["current_claim"] = {
+            "city_id": "test-city",
+            "truth_status": True,
+            "dialogue_id": 1,
+            "opening_message_id": 1,
+            "interviewer_question_count": 10,
+            "question_turns_ended": True,
+            "judgement": None,
+        }
+        room["next_speaker"] = None
+        return room, clients[interviewer_id], interviewer_id, clients[interviewee_id], interviewee_id
+
     def status(self, client):
         response = client.get("/api/rooms/ROOM01")
         self.assertEqual(response.status_code, 200)
@@ -195,6 +220,62 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["Cache-Control"], "no-store")
         self.assertIn(b'href="/study-ended"', response.data)
+
+    def test_feedback_condition_returns_correctness_only_to_interviewer(self):
+        room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_judgement("feedback")
+
+        response = interviewer.post("/api/rooms/ROOM01/judgement", json={
+            "participant_id": interviewer_id,
+            "judgement": "false",
+            "confidence": 80,
+        })
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json(), {"status": "ok", "correct": False})
+        self.assertEqual(room["current_claim"]["judgement"]["judgement"], "false")
+        self.assertIn("timestamp", room["current_claim"]["judgement"])
+
+        # The interviewee cannot submit a judgement or retrieve its correctness result.
+        denied = interviewee.post("/api/rooms/ROOM01/judgement", json={
+            "participant_id": interviewee_id,
+            "judgement": "true",
+            "confidence": 50,
+        })
+        self.assertEqual(denied.status_code, 403)
+        poll = interviewee.get(
+            f"/api/rooms/ROOM01/messages?participant_id={interviewee_id}&after_id=0"
+        )
+        self.assertEqual(poll.status_code, 200)
+        self.assertNotIn("correct", poll.get_json())
+        self.assertNotIn("judgement", poll.get_json())
+
+    def test_control_condition_omits_correctness_and_continues(self):
+        room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_judgement("control")
+
+        response = interviewer.post("/api/rooms/ROOM01/judgement", json={
+            "participant_id": interviewer_id,
+            "judgement": "false",
+            "confidence": 80,
+        })
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json(), {"status": "ok"})
+        self.assertEqual(room["current_claim"]["judgement"]["judgement"], "false")
+        self.assertIn("timestamp", room["current_claim"]["judgement"])
+
+        # Control still advances through the normal server-controlled transition.
+        continued = interviewer.post(
+            "/api/rooms/ROOM01/continue",
+            json={"participant_id": interviewer_id},
+        )
+        self.assertEqual(continued.status_code, 201)
+        self.assertIn("transition_end", room)
+        poll = interviewee.get(
+            f"/api/rooms/ROOM01/messages?participant_id={interviewee_id}&after_id=0"
+        )
+        self.assertEqual(poll.status_code, 200)
+        self.assertNotIn("correct", poll.get_json())
+        self.assertNotIn("judgement", poll.get_json())
 
     def test_study_ended_requires_completion_and_renders_prolific_fallback(self):
         # Consent remains required even for a request to the final completion page.

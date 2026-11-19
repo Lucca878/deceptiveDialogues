@@ -748,12 +748,20 @@ def match_room(): # Handles the API request to match a participant to a room
         rooms[code]["owners"][participant_id] = token
         rooms[code]["screening_submission_ids"][participant_id] = session["screening_submission_id"] # Store the screening submission ID for the participant in the room; if room exists, update it with the new participant's ID.
         session.update(room_code=code, room_participant_id=participant_id, room_token=token)
-        participants = rooms[code]["participants"]
-        participants[participant_id] = None
-        roles = ["interviewer", "interviewee"]
+        participants = rooms[code]["participants"] # Get the dictionary of participants for the current room
+        participants[participant_id] = None # Initialize the participant's role to None until assigned
+        roles = ["interviewer", "interviewee"] # List of possible roles for participants in the room
         if choice((True, False)):
             roles.reverse()
-        participants.update(zip(participants, roles))
+        participants.update(zip(participants, roles)) # Assign roles to participants in the room, pairing them with the available roles
+        # Find the participant who was assigned the interviewer role.
+        interviewer_id = next(
+            pid for pid, role in participants.items() if role == "interviewer"
+        )
+        # Independently choose feedback or control with equal probability.
+        assigned_condition = choice(("feedback", "control"))
+        # Keep the condition in server-side room state, keyed by the interviewer ID.
+        rooms[code]["conditions"] = {interviewer_id: assigned_condition}
         return jsonify(code=code, status="paired", role=participants[participant_id])
 
 
@@ -867,10 +875,21 @@ def submit_judgement(code):
             "confidence": confidence,
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }
-        # Compare the submitted judgement with the server-only truth_status and return correctness to this interviewer-authorized request.
-        truth_status = room["current_claim"].get("truth_status")
-        correct = ((judgement == "true") == truth_status)
-    return jsonify(status="ok", correct=correct), 201
+        # only when this room's assigned interviewer is in the feedback condition; never expose it to control.
+        # Determine if the current interviewer is in the feedback condition
+        interviewer_id = next(
+            pid for pid, role in room["participants"].items() if role == "interviewer"
+        )
+        condition = room.get("conditions", {}).get(interviewer_id)
+        if condition == "feedback":
+            truth_status = room["current_claim"].get("truth_status")
+            correct = ((judgement == "true") == truth_status)
+            return jsonify(status="ok", correct=correct), 201
+        else:
+            return jsonify(status="ok"), 201
+        # truth_status = room["current_claim"].get("truth_status")
+        # correct = ((judgement == "true") == truth_status)
+    # This line is now handled within the feedback condition check above
     
 
 @app.post("/api/rooms/<code>/continue") # Advances the claim index after a judgement; only the bound interviewer can perform this action

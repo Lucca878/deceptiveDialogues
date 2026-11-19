@@ -48,6 +48,47 @@ class RoomMatchingTests(unittest.TestCase):
         self.assertEqual({status["role"], second["role"]}, {"interviewer", "interviewee"})
         self.assertEqual(third, {"code": "ROOM02", "status": "waiting"})
 
+    def test_room_condition_is_assigned_once_to_interviewer_and_stays_private(self):
+        # Fix random draws so both possible second-arrival roles are covered deterministically.
+        with patch("server.choice", side_effect=[False, "feedback", True, "control"]):
+            first_waiting = self.match("first").get_json()
+            first_paired = self.match("second").get_json()
+            first_retry = self.match("first").get_json()
+            second_waiting = self.match("third").get_json()
+            second_paired = self.match("fourth").get_json()
+
+        self.assertEqual(first_waiting, {"code": "ROOM01", "status": "waiting"})
+        self.assertEqual(second_waiting, {"code": "ROOM02", "status": "waiting"})
+        self.assertEqual(set(first_paired), {"code", "status", "role"})
+        self.assertEqual(set(second_paired), {"code", "status", "role"})
+        self.assertEqual(set(first_retry), {"code", "status", "role"})
+        self.assertEqual(first_retry["status"], "paired")
+
+        expected_conditions = {"ROOM01": "feedback", "ROOM02": "control"}
+        room_clients = {
+            "ROOM01": ((self.clients["first"], "first"), (self.clients["second"], "second")),
+            "ROOM02": ((self.clients["third"], "third"), (self.clients["fourth"], "fourth")),
+        }
+        for room_code, condition in expected_conditions.items():
+            with self.subTest(room_code=room_code, condition=condition):
+                room = server.rooms[room_code]
+                interviewer_id = next(
+                    pid for pid, role in room["participants"].items() if role == "interviewer"
+                )
+                self.assertEqual(room["conditions"], {interviewer_id: condition})
+
+                # Status responses and signed browser sessions must not reveal the condition.
+                for client, participant_id in room_clients[room_code]:
+                    status = client.get(
+                        f"/api/rooms/{room_code}?participant_id={participant_id}"
+                    )
+                    self.assertEqual(status.status_code, 200)
+                    self.assertNotIn("condition", status.get_json())
+                    self.assertNotIn("conditions", status.get_json())
+                    with client.session_transaction() as browser_session:
+                        self.assertNotIn("condition", browser_session)
+                        self.assertNotIn("conditions", browser_session)
+
     def test_refresh_and_retry_keep_existing_membership(self):
         first = self.match("first").get_json()
         self.assertEqual(self.match("first").get_json(), first)
