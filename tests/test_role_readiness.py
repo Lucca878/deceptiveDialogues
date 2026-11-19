@@ -515,7 +515,8 @@ class RoleReadinessTests(unittest.TestCase):
             else:
                 self.assertNotIn(b'id="transition-maze"', dialogue_response.data)
                 self.assertIn(b'id="question-type-step" hidden', dialogue_response.data)
-                self.assertIn(b"Please select the question type", dialogue_response.data)
+                self.assertIn(b'aria-label="Please select a question type"', dialogue_response.data)
+                self.assertIn(b"Please select a question type", dialogue_response.data)
                 self.assertIn(b'id="question-type" name="question_type"', dialogue_response.data)
                 self.assertIn(b'value="open-ended"', dialogue_response.data)
                 self.assertIn(b'value="closed-ended"', dialogue_response.data)

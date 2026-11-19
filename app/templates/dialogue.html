@@ -74,9 +74,8 @@
         {% if role == 'interviewer' %}
         <!-- Ask for the category only after the interviewer drafts and selects Send. -->
         <div class="judgement-step question-type-step" id="question-type-step" hidden>
-          <p class="judgement-instruction" id="question-type-instruction">Please select the question type</p>
-          <select id="question-type" name="question_type" aria-labelledby="question-type-instruction" required disabled>
-            <option value="" disabled selected>Select question type</option>
+          <select id="question-type" name="question_type" aria-label="Please select a question type" required disabled>
+            <option value="" disabled selected>Please select a question type</option>
             <option value="open-ended">Open-ended</option>
             <option value="closed-ended">Closed-ended</option>
             <option value="follow-up">Follow-up</option>
