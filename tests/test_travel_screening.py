@@ -376,6 +376,7 @@ class TravelScreeningTests(unittest.TestCase):
         sent = interviewer.post("/api/rooms/ROOM01/messages", json={
             "participant_id": interviewer_id, "text": "Hello", "screening_submission_id": second_id,
             "answers": first_record["answers"], "truth": "forged", "timestamp": "forged",
+            "question_type": "open-ended",
         })
         self.assertEqual(sent.status_code, 201)
         self.assertEqual(set(sent.get_json()), {"message"})

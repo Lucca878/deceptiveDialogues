@@ -73,6 +73,22 @@ class RoleReadinessTests(unittest.TestCase):
         room["next_speaker"] = None
         return room, clients[interviewer_id], interviewer_id, clients[interviewee_id], interviewee_id
 
+    def prepare_message_turn(self):
+        """Prepare a ready pair with the interviewer allowed to send the first question."""
+        self.pair()
+        room = server.rooms["ROOM01"]
+        room["ready"].update(room["participants"])
+        clients = {"first": self.first, "second": self.second}
+        for client in clients.values():
+            self.assertEqual(client.get("/dialogue").status_code, 200)
+        interviewer_id = next(
+            pid for pid, role in room["participants"].items() if role == "interviewer"
+        )
+        interviewee_id = next(
+            pid for pid, role in room["participants"].items() if role == "interviewee"
+        )
+        return room, clients[interviewer_id], interviewer_id, clients[interviewee_id], interviewee_id
+
     def status(self, client):
         response = client.get("/api/rooms/ROOM01")
         self.assertEqual(response.status_code, 200)
@@ -308,6 +324,77 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertIn(f'href="{destination}"'.encode(), response.data)
         self.assertIn(f'content="10;url={destination}"'.encode(), response.data)
 
+    def test_interviewer_message_requires_valid_category_and_stores_it_privately(self):
+        room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_message_turn()
+        endpoint = "/api/rooms/ROOM01/messages"
+
+        missing_category = interviewer.post(endpoint, json={
+            "participant_id": interviewer_id,
+            "text": "What did you enjoy about the city?",
+        })
+        self.assertEqual(missing_category.status_code, 400)
+        self.assertEqual(room["current_claim"]["interviewer_question_count"], 0)
+        self.assertEqual(room["next_speaker"], "interviewer")
+
+        invalid_category = interviewer.post(endpoint, json={
+            "participant_id": interviewer_id,
+            "text": "What did you enjoy about the city?",
+            "question_type": "unsupported",
+        })
+        self.assertEqual(invalid_category.status_code, 400)
+        self.assertEqual(room["current_claim"]["interviewer_question_count"], 0)
+        self.assertEqual(room["next_speaker"], "interviewer")
+        self.assertEqual(len(room["messages"]), 1)  # Only the server-generated opening claim exists.
+
+        accepted = interviewer.post(endpoint, json={
+            "participant_id": interviewer_id,
+            "text": "What did you enjoy about the city?",
+            "question_type": "open-ended",
+        })
+        self.assertEqual(accepted.status_code, 201)
+        projected_message = accepted.get_json()["message"]
+        self.assertNotIn("question_type", projected_message)
+        saved_message = room["messages"][-1]
+        self.assertEqual(saved_message["question_type"], "open-ended")
+        self.assertEqual(saved_message["role"], "interviewer")
+
+        # Neither the interviewer nor interviewee receives the server-only category through polling.
+        for client, participant_id in ((interviewer, interviewer_id), (interviewee, interviewee_id)):
+            poll = client.get(endpoint, query_string={"participant_id": participant_id}).get_json()
+            question = next(message for message in poll["messages"] if message["id"] == saved_message["id"])
+            self.assertNotIn("question_type", question)
+
+    def test_interviewee_messages_reject_category_and_store_no_category(self):
+        room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_message_turn()
+        endpoint = "/api/rooms/ROOM01/messages"
+
+        interviewer_question = interviewer.post(endpoint, json={
+            "participant_id": interviewer_id,
+            "text": "What did you enjoy about the city?",
+            "question_type": "follow-up",
+        })
+        self.assertEqual(interviewer_question.status_code, 201)
+
+        rejected_answer = interviewee.post(endpoint, json={
+            "participant_id": interviewee_id,
+            "text": "I enjoyed the museums.",
+            "question_type": "probing",
+        })
+        self.assertEqual(rejected_answer.status_code, 400)
+        self.assertEqual(room["next_speaker"], "interviewee")
+        self.assertEqual(len(room["messages"]), 2)
+
+        accepted_answer = interviewee.post(endpoint, json={
+            "participant_id": interviewee_id,
+            "text": "I enjoyed the museums.",
+        })
+        self.assertEqual(accepted_answer.status_code, 201)
+        self.assertNotIn("question_type", room["messages"][-1])
+        self.assertNotIn("question_type", accepted_answer.get_json()["message"])
+        for client, participant_id in ((interviewer, interviewer_id), (interviewee, interviewee_id)):
+            poll = client.get(endpoint, query_string={"participant_id": participant_id}).get_json()
+            self.assertTrue(all("question_type" not in message for message in poll["messages"]))
+
     def test_message_poll_only_returns_messages_from_active_dialogue(self):
         self.pair()
         room = server.rooms["ROOM01"]
@@ -475,7 +562,7 @@ class RoleReadinessTests(unittest.TestCase):
         # Test that an accepted interviewer message makes the interviewee the next allowed speaker.
         interviewer_message = interviewer.post(
             "/api/rooms/ROOM01/messages",
-            json={"participant_id": interviewer_id, "text": "Question 1?", "role": "spoof"},
+            json={"participant_id": interviewer_id, "text": "Question 1?", "role": "spoof", "question_type": "open-ended"},
         )
         self.assertEqual(interviewer_message.status_code, 201)
         self.assertEqual(interviewer_message.get_json()["message"]["role"], "interviewer")
@@ -516,7 +603,7 @@ class RoleReadinessTests(unittest.TestCase):
         for question_number in range(2, 11):
             question = interviewer.post(
                 "/api/rooms/ROOM01/messages",
-                json={"participant_id": interviewer_id, "text": f"Question {question_number}?"},
+                json={"participant_id": interviewer_id, "text": f"Question {question_number}?", "question_type": "open-ended"},
             )
             self.assertEqual(question.status_code, 201)
             self.assertEqual(room["current_claim"]["interviewer_question_count"], question_number)

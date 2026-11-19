@@ -71,6 +71,17 @@
       </p>
 
       <form class="chat-composer" id="chat-form">
+        {% if role == 'interviewer' %}
+        <label for="question-type">Question type</label>
+        <select id="question-type" name="question-type" required>
+          <option value="" disabled selected>Select question type</option>
+          <option value="open-ended">Open-ended</option>
+          <option value="closed-ended">Closed-ended</option>
+          <option value="follow-up">Follow-up</option>
+          <option value="clarification">Clarification</option>
+          <option value="probing">Probing</option>
+        </select>
+        {% endif %}
         <label class="visually-hidden" for="chat-input">Message</label>
         <input id="chat-input" name="message" type="text" placeholder="Waiting for the interviewee to start..." autocomplete="off" required disabled>
         <button class="button chat-send" type="submit" disabled>Send</button>

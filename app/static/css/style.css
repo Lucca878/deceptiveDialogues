@@ -1235,7 +1235,28 @@ h1 {
   font: inherit;
 }
 
+#question-type {
+  flex: 0 1 12rem;
+  min-width: 10rem;
+  min-height: 2.9rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #b9c1cb;
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+#chat-form > label[for="question-type"] {
+  align-self: center;
+  color: var(--ink);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
 .chat-composer > input:focus-visible,
+#question-type:focus-visible,
 .chat-send:focus-visible {
   outline: 3px solid var(--button-hover);
   outline-offset: 3px;
@@ -1511,6 +1532,21 @@ h1 {
     height: 100svh;
     height: 100dvh;
     padding: 1rem;
+  }
+
+  #chat-form {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  #chat-form > label[for="question-type"],
+  #question-type {
+    grid-column: 1 / -1;
+  }
+
+  #question-type {
+    width: 100%;
+    min-width: 0;
   }
 
   .room-join {

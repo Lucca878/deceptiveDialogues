@@ -64,6 +64,7 @@ const mazeControls = role === "interviewee"
   : []; // Direction buttons are omitted from the interviewer page.
 const roomCode = sessionStorage.getItem("chat-room-code"); // Active chat room code
 const participantId = sessionStorage.getItem("participant-id"); // Unique identifier for the participant
+const questionTypeSelect = document.querySelector<HTMLSelectElement>("#question-type"); //  Question type select element
 if (
   (role !== "interviewer" && role !== "interviewee") ||
   !roomCode ||
@@ -487,6 +488,7 @@ if (
     continueButton.addEventListener("click", continueToNextClaim);
   }
   
+
   form.addEventListener("submit", (event) => {
     event.preventDefault(); // Prevent the default form submission behavior
 
@@ -500,7 +502,7 @@ if (
     void fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/messages`, { // Send a new message to the server
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ participant_id: activeParticipantId, text }),
+      body: JSON.stringify({ participant_id: activeParticipantId, text, question_type: questionTypeSelect?.value }),
     }) // Handle the server response for the new message
       .then(async (response) => { // Process the server response for the new message
         const data = await response.json() as {
@@ -516,6 +518,7 @@ if (
         if (!response.ok || !data.message) throw new Error(data.error ?? "Could not send message."); // Throw an error if the message could not be sent
         canSend = false; // The server has switched the turn; wait for polling to confirm the next permission
         renderMessage(data.message); // Render the newly sent message in the chat UI
+        if (questionTypeSelect) questionTypeSelect.value = ""; // Reset the question type select after a successful send
       })
       .catch((error: unknown) => {
         input.value = text;

@@ -141,7 +141,7 @@ class RoomMatchingTests(unittest.TestCase):
 
         sent = sender.post(
             "/api/rooms/ROOM01/messages",
-            json={"participant_id": sender_id, "text": "Hello", "timestamp": "client value"},
+            json={"participant_id": sender_id, "text": "Hello", "timestamp": "client value", "question_type": "open-ended"},
         )
         self.assertEqual(sent.status_code, 201)
         self.assertNotIn("timestamp", sent.get_json()["message"])

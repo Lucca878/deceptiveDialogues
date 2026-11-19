@@ -817,7 +817,13 @@ def send_room_message(code): # Handles sending a message to a specific room by a
         # Reject this request unless role matches the room's next allowed speaker.
         if role != room["next_speaker"]:
             return jsonify(error="It is not your turn to speak."), 403
-    
+        question_type = data.get("question_type")
+        if role == "interviewer":
+            if question_type not in ["open-ended", "closed-ended", "follow-up", "clarification", "probing"]:
+                return jsonify(error="A valid question type is required for interviewer messages."), 400
+        else:
+            if question_type is not None:
+                return jsonify(error="Interviewee messages cannot have a question type."), 400
         message = {
             "id": len(room["messages"]) + 1,
             "participant_id": participant_id,
@@ -825,6 +831,8 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             "text": text,
             "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
         }
+        if role == "interviewer":
+            message["question_type"] = question_type
         room["messages"].append(message)
         # If the accepted message is from the interviewer, increment this claim's question count.
         if role == "interviewer":

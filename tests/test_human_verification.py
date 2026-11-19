@@ -206,6 +206,7 @@ class HumanVerificationTests(unittest.TestCase):
             client, participant_id = clients_by_role[role]
             self.assertEqual(client.post("/api/rooms/ROOM01/messages", json={
                 "participant_id": participant_id, "text": "Hello",
+                **({"question_type": "open-ended"} if role == "interviewer" else {}),
             }).status_code, 201)
             for poll_client, poll_id in ((first, "first"), (second, "second")):
                 self.assertEqual(poll_client.get("/api/rooms/ROOM01/messages", query_string={
