@@ -1020,7 +1020,7 @@ def match_room(): # Handles the API request to match a participant to a room
             token = token_hex(32)
             # Add a room field for the next allowed speaker; initialize it to None until the claim exists.
             participant_id = session.get("participant_id", "")
-            rooms[code] = {"archive_id": token_hex(16), "created_at": _utc_timestamp(), "participants": {room_participant_id: None}, "messages": [], "dialogues": [], "typing": {}, "ready": set(), "owners": {room_participant_id: token}, "participant_ids": {room_participant_id: participant_id}, "current_claim": None, "current_claim_index": 0, "next_speaker": None}
+            rooms[code] = {"archive_id": token_hex(16), "created_at": _utc_timestamp(), "participants": {room_participant_id: None}, "messages": [], "dialogues": [], "raw_events": [], "typing": {}, "ready": set(), "owners": {room_participant_id: token}, "participant_ids": {room_participant_id: participant_id}, "current_claim": None, "current_claim_index": 0, "next_speaker": None}
             rooms[code]["screening_submission_ids"] = {room_participant_id: session["screening_submission_id"]} # Store the screening submission ID for this room participant.
             session.update(room_code=code, room_participant_id=room_participant_id, room_token=token)
             study_state = study_sessions.get(participant_id)
@@ -1059,6 +1059,24 @@ def match_room(): # Handles the API request to match a participant to a room
         assigned_condition = choice(("feedback", "control"))
         # Keep the condition in server-side room state, keyed by the interviewer ID.
         rooms[code]["conditions"] = {interviewer_room_participant_id: assigned_condition}
+        # Buffer the authoritative role and condition assignment; it is batch-written at feedback with the rest of the study.
+        rooms[code]["raw_events"].append({
+            "event_id": token_hex(16),
+            "room_id": rooms[code]["archive_id"],
+            "room_code": code,
+            "event_type": "room_paired",
+            "occurred_at": rooms[code]["paired_at"],
+            "event_data": {
+                "participants": [
+                    {
+                        "participant_id": rooms[code]["participant_ids"][room_participant_id],
+                        "role": role,
+                    }
+                    for room_participant_id, role in participants.items()
+                ],
+                "condition": assigned_condition,
+            },
+        })
         return jsonify(code=code, status="paired", role=participants[room_participant_id])
 
 

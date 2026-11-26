@@ -24,6 +24,7 @@ from app.database import (
     ScreeningSubmission,
 )
 from app.run_tables import RUN_ID_PATTERN
+from app.run_tables import insert_raw_events
 from city_candidates import CANDIDATE_CITIES
 
 
@@ -439,6 +440,13 @@ def archive_completed_room(
             ):
                 setattr(feedback, field, source[field])
             feedback.submitted_at = source["timestamp"]
+
+            # Commit buffered raw events with the normalized feedback snapshot; IDs make this safe on the partner's later submission.
+            insert_raw_events(
+                db.session.connection(),
+                current_app.config["STUDY_RUN_ID"],
+                room_state.get("raw_events", []),
+            )
         return True
     except (SQLAlchemyError, KeyError, TypeError, ValueError):
         db.session.rollback()

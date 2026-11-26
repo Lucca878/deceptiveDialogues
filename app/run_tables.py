@@ -22,6 +22,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection
 
 
 RUN_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
@@ -125,6 +126,48 @@ def initialize_study_run(
             configuration_hash=configuration_hash,
         ))
     return True
+
+
+def insert_raw_events(connection: Connection, run_id: str, events: list[dict[str, Any]]) -> int:
+    """Insert buffered events once, omitting study_run_id so the table default supplies it."""
+    if not events:
+        return 0
+
+    # Define the dynamic table only after validating the run suffix used in its SQL name.
+    _, raw_table, _ = _run_tables(run_id)
+    event_ids = [event.get("event_id") for event in events]
+    if any(not isinstance(event_id, str) or not event_id for event_id in event_ids):
+        raise ValueError("Every raw event must have a non-empty event_id.")
+    if len(set(event_ids)) != len(event_ids):
+        raise ValueError("A raw event batch cannot contain duplicate event_id values.")
+
+    # Exclude already persisted event IDs so a second participant's feedback retry cannot duplicate room events.
+    existing_event_ids = set(connection.execute(
+        select(raw_table.c.event_id).where(raw_table.c.event_id.in_(event_ids))
+    ).scalars())
+    timestamp_columns = {"occurred_at", "started_at", "ended_at"}
+    allowed_columns = {column.name for column in raw_table.columns} - {"study_run_id"}
+    rows = []
+    for event in events:
+        if "study_run_id" in event:
+            raise ValueError("Raw events must rely on the table-specific study_run_id default.")
+        if not isinstance(event.get("event_type"), str) or not isinstance(event.get("event_data"), dict):
+            raise ValueError("Raw events require an event_type and one event_data object.")
+        if event["event_id"] in existing_event_ids:
+            continue
+
+        # Convert server ISO timestamps to SQLAlchemy datetime values for the raw table's typed time columns.
+        row = {key: value for key, value in event.items() if key in allowed_columns}
+        for key in timestamp_columns:
+            timestamp = row.get(key)
+            if isinstance(timestamp, str):
+                row[key] = datetime.fromisoformat(timestamp)
+        rows.append(row)
+
+    if rows:
+        # Use the caller's transaction so raw events and the feedback archive commit or roll back together.
+        connection.execute(raw_table.insert(), rows)
+    return len(rows)
 
 
 def _load_configuration(path: Path) -> dict[str, Any]:

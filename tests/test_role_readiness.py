@@ -2,8 +2,11 @@ from concurrent.futures import ThreadPoolExecutor
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy import MetaData, Table, select, text
+
 import server
 from app.database import db, Participant, Room as ArchivedRoom
+from app.run_tables import initialize_study_run
 
 
 class RoleReadinessTests(unittest.TestCase):
@@ -12,7 +15,18 @@ class RoleReadinessTests(unittest.TestCase):
         config.start()
         self.addCleanup(config.stop)
         with server.app.app_context():
+            # Drop dynamic run tables explicitly because they are not registered in Flask-SQLAlchemy's fixed metadata.
+            with db.engine.begin() as connection:
+                connection.execute(text("DROP TABLE IF EXISTS raw_test"))
+                connection.execute(text("DROP TABLE IF EXISTS metadata_test"))
             db.create_all()
+            # Create the raw event destination that the production initializer prepares before participant collection.
+            initialize_study_run(
+                db.engine,
+                "test",
+                {"human_verification_required": True},
+                "dialogue_v1",
+            )
         with server.rooms_lock:
             server.rooms.clear()
             server.screening_submissions.clear()
@@ -28,6 +42,10 @@ class RoleReadinessTests(unittest.TestCase):
         with server.app.app_context():
             db.session.remove()
             db.drop_all()
+            # Clean up the dynamic tables separately from the legacy ORM tables.
+            with db.engine.begin() as connection:
+                connection.execute(text("DROP TABLE IF EXISTS raw_test"))
+                connection.execute(text("DROP TABLE IF EXISTS metadata_test"))
 
     def eligible_client(self):
         """Use separate real consent, screening and pre-match sessions."""
@@ -292,6 +310,56 @@ class RoleReadinessTests(unittest.TestCase):
                 pid for pid, role in room["participants"].items() if role == "interviewer"
             )])
             self.assertEqual(len(archived_room.messages), len(room["messages"]))
+
+    def test_room_paired_event_is_batched_at_feedback_and_saved_only_once(self):
+        room = self.complete_dialogues()
+        self.assertEqual(len(room["raw_events"]), 1)
+        event = room["raw_events"][0]
+        self.assertEqual(event["event_type"], "room_paired")
+        self.assertEqual(event["room_id"], room["archive_id"])
+        self.assertEqual(event["room_code"], "ROOM01")
+        self.assertEqual(event["occurred_at"], room["paired_at"])
+        self.assertIsNone(event.get("participant_id"))
+        self.assertEqual(event["event_data"]["condition"], room["conditions"][
+            next(room_participant_id for room_participant_id, role in room["participants"].items() if role == "interviewer")
+        ])
+        self.assertCountEqual(
+            [entry["participant_id"] for entry in event["event_data"]["participants"]],
+            list(room["participant_ids"].values()),
+        )
+        self.assertCountEqual(
+            [entry["role"] for entry in event["event_data"]["participants"]],
+            ["interviewer", "interviewee"],
+        )
+
+        # Pairing only buffers the raw row; the configured save-at-feedback policy persists it later.
+        with server.app.app_context():
+            raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
+            self.assertEqual(db.session.execute(select(raw_table)).mappings().all(), [])
+
+        feedback_data = {
+            "task_skill": "5",
+            "task_difficulty": "4",
+            "task_motivation": "6",
+            "strategy": "Ask focused questions",
+            "additional_feedback": "",
+        }
+        first_feedback = self.first.post("/submit_feedback", data=feedback_data)
+        self.assertEqual(first_feedback.status_code, 302)
+        with server.app.app_context():
+            raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
+            saved_events = db.session.execute(select(raw_table)).mappings().all()
+        self.assertEqual(len(saved_events), 1)
+        self.assertEqual(saved_events[0]["study_run_id"], "test")
+        self.assertEqual(saved_events[0]["event_id"], event["event_id"])
+        self.assertEqual(saved_events[0]["event_data"]["condition"], event["event_data"]["condition"])
+
+        # The second feedback transaction sees the same buffered event but must not insert a duplicate row.
+        second_feedback = self.second.post("/submit_feedback", data=feedback_data)
+        self.assertEqual(second_feedback.status_code, 302)
+        with server.app.app_context():
+            saved_count = db.session.execute(select(raw_table.c.event_id)).scalars().all()
+        self.assertEqual(saved_count, [event["event_id"]])
 
     def test_second_feedback_updates_same_archived_room(self):
         room = self.complete_dialogues()
