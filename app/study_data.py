@@ -23,11 +23,12 @@ from app.database import (
     ScreeningAnswer,
     ScreeningSubmission,
 )
+from app.run_tables import RUN_ID_PATTERN
 from city_candidates import CANDIDATE_CITIES
 
 
 PARTICIPANT_COLUMNS = (
-    "session_id", "dataset", "study_started_at", "study_completed_at",
+    "participant_id", "study_run_id", "study_started_at", "study_completed_at",
     "verification_duration_seconds", "landing_duration_seconds", "consent_duration_seconds",
     "screening_duration_seconds", "instructions_duration_seconds", "room_duration_seconds",
     "role_instructions_seconds", "dialogue_duration_seconds", "feedback_duration_seconds",
@@ -238,7 +239,7 @@ def _room_export(room: Room) -> dict[str, Any]:
         "messages": [
             {
                 "sequence": message.sequence,
-                "session_id": message.participant_id,
+                "participant_id": message.participant_id,
                 "role": message.role,
                 "message": message.text,
                 "question_type": message.question_type,
@@ -484,7 +485,7 @@ def record_prolific_handoff(
 
 # Export contract: preserve the agreed column order and spelling exactly.
 PARTICIPANT_COLUMNS = (
-    "session_id", "dataset", "study_started_at", "study_completed_at",
+    "participant_id", "study_run_id", "study_started_at", "study_completed_at",
     "verification_duration_seconds", "landing_duration_seconds", "consent_duration_seconds",
     "screening_duration_seconds", "instructions_duration_seconds", "room_duration_seconds",
     "role_instructions_seconds", "dialogue_duration_seconds", "feedback_duration_seconds",
@@ -497,9 +498,9 @@ PARTICIPANT_COLUMNS = (
     for column in (f"screening_{city_id}_visited", f"screening_{city_id}_familiarity")
 )
 ROOM_COLUMNS = (
-    "room_id", "room_code", "dataset", "condition", "interviewer_session_id",
-    "Interviewee_session_id", "dialogue_duration_seconds", "judgment_duration_seconds",
-    "dialogue_number", "claim", "ground_truth", "judgment", "confidence", "correct",
+    "room_id", "room_code", "study_run_id", "condition", "interviewer_participant_id",
+    "interviewee_participant_id", "dialogue_duration_seconds", "judgement_duration_seconds",
+    "dialogue_number", "claim", "ground_truth", "judgement", "confidence", "correct",
 ) + tuple(
     column
     for turn in range(1, 11)
@@ -572,8 +573,8 @@ def _json_participant(participant: Participant) -> dict[str, Any]:
         for answer in (_json_screening(screening) or {}).get("answers", [])
     }
     row = {
-        "session_id": participant.study_session_id,
-        "dataset": participant.dataset,
+        "participant_id": participant.study_session_id,
+        "study_run_id": participant.dataset,
         "study_started_at": participant.study_started_at,
         "study_completed_at": participant.prolific_redirect_at,
         **durations,
@@ -626,8 +627,8 @@ def _json_room(room: Room) -> dict[str, Any]:
             "claim": dialogue.claim_text,
             "ground_truth": dialogue.truth_status,
             "dialogue_duration_seconds": dialogue.dialogue_duration_seconds,
-            "judgment_duration_seconds": dialogue.judgement_duration_seconds,
-            "judgment": dialogue.judgement,
+            "judgement_duration_seconds": dialogue.judgement_duration_seconds,
+            "judgement": dialogue.judgement,
             "confidence": dialogue.confidence,
             "correct": dialogue.correct,
             "started_at": dialogue.started_at,
@@ -639,10 +640,10 @@ def _json_room(room: Room) -> dict[str, Any]:
     return {
         "room_id": room.id,
         "room_code": room.room_code,
-        "dataset": room.dataset,
+        "study_run_id": room.dataset,
         "condition": room.condition,
-        "interviewer_session_id": room.interviewer_study_session_id,
-        "interviewee_session_id": room.interviewee_study_session_id,
+        "interviewer_participant_id": room.interviewer_study_session_id,
+        "interviewee_participant_id": room.interviewee_study_session_id,
         "interviewer_screening": _json_screening(room.interviewer_screening),
         "interviewee_screening": _json_screening(room.interviewee_screening),
         "created_at": room.created_at,
@@ -652,7 +653,7 @@ def _json_room(room: Room) -> dict[str, Any]:
         "messages": [
             {
                 "sequence": message.sequence,
-                "session_id": message.participant_id,
+                "participant_id": message.participant_id,
                 "role": message.role,
                 "message": message.text,
                 "question_type": message.question_type,
@@ -680,16 +681,16 @@ def _room_csv_row(room: dict[str, Any], dialogue: dict[str, Any]) -> dict[str, A
     row = {
         "room_id": room["room_id"],
         "room_code": room["room_code"],
-        "dataset": room["dataset"],
+        "study_run_id": room["study_run_id"],
         "condition": room["condition"],
-        "interviewer_session_id": room["interviewer_session_id"],
-        "Interviewee_session_id": room["interviewee_session_id"],
+        "interviewer_participant_id": room["interviewer_participant_id"],
+        "interviewee_participant_id": room["interviewee_participant_id"],
         "dialogue_duration_seconds": dialogue["dialogue_duration_seconds"],
-        "judgment_duration_seconds": dialogue["judgment_duration_seconds"],
+        "judgement_duration_seconds": dialogue["judgement_duration_seconds"],
         "dialogue_number": dialogue["dialogue_number"],
         "claim": dialogue["claim"],
         "ground_truth": dialogue["ground_truth"],
-        "judgment": dialogue["judgment"],
+        "judgement": dialogue["judgement"],
         "confidence": dialogue["confidence"],
         "correct": dialogue["correct"],
     }
@@ -709,57 +710,59 @@ def _write_csv(path: Path, columns: tuple[str, ...], rows: list[dict[str, Any]])
     os.chmod(path, 0o600)
 
 
-def export_study(output: Path, dataset: str) -> dict[str, int]:
-    """Write private CSV and JSON exports for one dataset label."""
+def export_study(output: Path, run_id: str) -> dict[str, int]:
+    """Write run-prefixed private CSV and JSON exports directly into one directory."""
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise click.ClickException("Run ID must start with a lowercase letter and contain only lowercase letters, digits, or underscores (max 32 characters).")
     output = output.expanduser().resolve()
     static_root = Path(current_app.static_folder).resolve()
     if output == static_root or static_root in output.parents:
         raise click.ClickException("Export output must not be inside the public static directory.")
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(output, 0o700)
-    room_directory = output / "rooms"
-    room_directory.mkdir(exist_ok=True, mode=0o700)
-    os.chmod(room_directory, 0o700)
+    export_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    exported_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
     participants = db.session.execute(
-        select(Participant).where(Participant.dataset == dataset)
+        select(Participant).where(Participant.dataset == run_id)
         .order_by(Participant.study_started_at, Participant.study_session_id)
     ).scalars().all()
     rooms = db.session.execute(
-        select(Room).where(Room.dataset == dataset).order_by(Room.created_at, Room.id)
+        select(Room).where(Room.dataset == run_id).order_by(Room.created_at, Room.id)
     ).scalars().all()
     participant_data = [_json_participant(participant) for participant in participants]
     room_data = [_json_room(room) for room in rooms]
 
-    with (output / "participants.csv").open("w", encoding="utf-8-sig", newline="") as output_file:
+    participant_csv = output / f"participants_{run_id}_{export_stamp}.csv"
+    room_csv = output / f"rooms_{run_id}_{export_stamp}.csv"
+    with participant_csv.open("w", encoding="utf-8-sig", newline="") as output_file:
         writer = csv.DictWriter(output_file, fieldnames=PARTICIPANT_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(participant_data)
-    os.chmod(output / "participants.csv", 0o600)
+    os.chmod(participant_csv, 0o600)
 
-    with (output / "rooms.csv").open("w", encoding="utf-8-sig", newline="") as output_file:
+    with room_csv.open("w", encoding="utf-8-sig", newline="") as output_file:
         writer = csv.DictWriter(output_file, fieldnames=ROOM_COLUMNS, extrasaction="ignore")
         writer.writeheader()
         for room in room_data:
             for dialogue in room["dialogues"]:
                 writer.writerow(_room_csv_row(room, dialogue))
-    os.chmod(output / "rooms.csv", 0o600)
+    os.chmod(room_csv, 0o600)
 
-    exported_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-    participants_json = {"dataset": dataset, "exported_at": exported_at, "participants": participant_data}
-    rooms_json = {"dataset": dataset, "exported_at": exported_at, "rooms": room_data}
-    complete_json = {"dataset": dataset, "exported_at": exported_at, "participants": participant_data, "rooms": room_data}
+    participants_json = {"study_run_id": run_id, "exported_at": exported_at, "participants": participant_data}
+    rooms_json = {"study_run_id": run_id, "exported_at": exported_at, "rooms": room_data}
+    complete_json = {"study_run_id": run_id, "exported_at": exported_at, "participants": participant_data, "rooms": room_data}
 
     def write_json(path: Path, data: dict[str, Any]) -> None:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.chmod(path, 0o600)
 
-    write_json(output / "participants.json", participants_json)
-    write_json(output / "rooms.json", rooms_json)
-    write_json(output / "complete.json", complete_json)
+    write_json(output / f"participants_{run_id}_{export_stamp}.json", participants_json)
+    write_json(output / f"rooms_{run_id}_{export_stamp}.json", rooms_json)
+    write_json(output / f"complete_{run_id}_{export_stamp}.json", complete_json)
     for room in room_data:
-        write_json(room_directory / f"room_{room['room_id']}.json", {
-            "dataset": dataset, "exported_at": exported_at, "room": room,
+        write_json(output / f"room_{room['room_id']}_{run_id}_{export_stamp}.json", {
+            "study_run_id": run_id, "exported_at": exported_at, "room": room,
         })
     return {
         "participants": len(participants),
@@ -769,14 +772,14 @@ def export_study(output: Path, dataset: str) -> dict[str, int]:
 
 
 def register_study_data(app: Flask) -> None:
-    """Register the explicit output-path TEST data export command."""
+    """Register the explicit shared-directory study export command."""
     @app.cli.command("export-study")
     @click.option("--output", type=click.Path(path_type=Path), required=True)
-    @click.option("--dataset", default=None, help="Defaults to STUDY_DATASET.")
-    def export_study_command(output: Path, dataset: str | None) -> None:
-        selected_dataset = dataset or current_app.config["STUDY_DATASET"]
-        counts = export_study(output, selected_dataset)
+    @click.option("--run-id", default=None, help="Defaults to STUDY_RUN_ID.")
+    def export_study_command(output: Path, run_id: str | None) -> None:
+        selected_run_id = run_id or current_app.config["STUDY_RUN_ID"]
+        counts = export_study(output, selected_run_id)
         click.echo(
-            f"Exported dataset={selected_dataset}: {counts['participants']} participants, "
+            f"Exported run_id={selected_run_id}: {counts['participants']} participants, "
             f"{counts['rooms']} rooms, {counts['dialogues']} dialogues to {output.resolve()}"
         )

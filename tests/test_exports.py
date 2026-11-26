@@ -180,13 +180,16 @@ class StudyExportTests(unittest.TestCase):
                 counts = export_study(Path(output_directory), "test")
 
             self.assertEqual(counts, {"participants": 2, "rooms": 1, "dialogues": 1})
-            with (Path(output_directory) / "participants.csv").open(encoding="utf-8-sig", newline="") as csv_file:
+            participant_csv = next(Path(output_directory).glob("participants_test_*.csv"))
+            room_csv = next(Path(output_directory).glob("rooms_test_*.csv"))
+            with participant_csv.open(encoding="utf-8-sig", newline="") as csv_file:
                 participant_reader = csv.DictReader(csv_file)
                 participant_rows = list(participant_reader)
                 headers = participant_reader.fieldnames
             self.assertEqual(headers, list(PARTICIPANT_COLUMNS))
             self.assertEqual(len(participant_rows), 2)
-            self.assertEqual(participant_rows[0]["session_id"], "session-interviewer")
+            self.assertEqual(participant_rows[0]["participant_id"], "session-interviewer")
+            self.assertEqual(participant_rows[0]["study_run_id"], "test")
             self.assertEqual(participant_rows[0]["room_id"], "opaque-room-id")
             self.assertEqual(participant_rows[0]["role"], "interviewer")
             self.assertEqual(participant_rows[0]["condition"], "feedback")
@@ -196,25 +199,23 @@ class StudyExportTests(unittest.TestCase):
             self.assertEqual(participant_rows[0]["screening_liverpool_familiarity"], "4")
             self.assertEqual(participant_rows[0]["dialogue_duration_seconds"], "400.0")
 
-            with (Path(output_directory) / "rooms.csv").open(encoding="utf-8-sig", newline="") as csv_file:
+            with room_csv.open(encoding="utf-8-sig", newline="") as csv_file:
                 room_reader = csv.DictReader(csv_file)
                 room_rows = list(room_reader)
                 room_headers = room_reader.fieldnames
             self.assertEqual(room_headers, list(ROOM_COLUMNS))
             self.assertEqual(len(room_rows), 1)
-            self.assertEqual(room_rows[0]["Interviewee_session_id"], "session-interviewee")
-            self.assertEqual(room_rows[0]["judgment"], "true")
+            self.assertEqual(room_rows[0]["interviewee_participant_id"], "session-interviewee")
+            self.assertEqual(room_rows[0]["judgement"], "true")
             self.assertEqual(room_rows[0]["confidence"], "80.0")
             self.assertEqual(room_rows[0]["interviewer_message_1"], "What did you do there?")
             self.assertEqual(room_rows[0]["question_type_interviewer_message_1"], "open-ended")
             self.assertEqual(room_rows[0]["interviewee_message_1"], "I visited the waterfront.")
 
-            participants_json = json.loads((Path(output_directory) / "participants.json").read_text())
-            rooms_json = json.loads((Path(output_directory) / "rooms.json").read_text())
-            complete_json = json.loads((Path(output_directory) / "complete.json").read_text())
-            per_room_json = json.loads(
-                (Path(output_directory) / "rooms" / "room_opaque-room-id.json").read_text()
-            )
+            participants_json = json.loads(next(Path(output_directory).glob("participants_test_*.json")).read_text())
+            rooms_json = json.loads(next(Path(output_directory).glob("rooms_test_*.json")).read_text())
+            complete_json = json.loads(next(Path(output_directory).glob("complete_test_*.json")).read_text())
+            per_room_json = json.loads(next(Path(output_directory).glob("room_opaque-room-id_test_*.json")).read_text())
             self.assertEqual(len(participants_json["participants"]), 2)
             self.assertEqual(len(rooms_json["rooms"]), 1)
             self.assertEqual(len(complete_json["participants"]), 2)

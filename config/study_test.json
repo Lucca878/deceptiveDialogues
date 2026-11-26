@@ -1,0 +1,17 @@
+{
+  "dialogue_count": 10,
+  "questions_per_dialogue": 10,
+  "screening_version": "english-cities-v1",
+  "question_types": [
+    "open-ended",
+    "closed-ended",
+    "follow-up",
+    "clarification",
+    "probing"
+  ],
+  "condition_allocation": {
+    "method": "equal_random_choice",
+    "conditions": ["feedback", "control"]
+  },
+  "human_verification_required": true
+}

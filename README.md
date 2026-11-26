@@ -24,12 +24,14 @@ npm run dev          # build TypeScript and start the Flask development server
 
 The Conda environment pins Python to 3.12 and installs Flask. Open <http://localhost:8000/> after the server starts. Stop it with `Ctrl+C`.
 
-### Optional Cloudflare Turnstile entry verification
+### Cloudflare Turnstile entry verification
 
-**Not active by default.** `TURNSTILE_ENABLED` defaults to `false`; adding this code or
-supplying keys alone does not enable verification. To activate it, create a Cloudflare
-Turnstile widget in **Managed** mode, configure its permitted hostnames in Cloudflare,
-and supply the following environment variables before starting/restarting Flask:
+Human verification is required for every participant study run. Local development and
+automated tests may explicitly disable the challenge, but the deployed study service
+forces `TURNSTILE_ENABLED=true`; missing credentials or host allowlists fail closed with
+HTTP 503. Create a Cloudflare Turnstile widget in **Managed** mode, configure its
+permitted hostnames in Cloudflare, and put the following values in the server-only
+`/etc/study2.env` file:
 
 | Variable | Required value when enabled |
 | --- | --- |
@@ -185,7 +187,7 @@ The TEST archive stores participant, room, screening, message, dialogue, page-vi
 
 ### Target raw-event design
 
-The following is the agreed target design for a later storage change; the current archive tables and export commands described below remain in use until that change is implemented.
+The run-specific tables and initializer are now implemented. Participant events are not yet written to `raw_test`; until event recording is implemented, feedback submission continues to archive through the existing compatibility tables and exports are generated from those tables.
 
 - Each collection run has a raw event table and a metadata table named `raw_<run_id>` and `metadata_<run_id>`. For the first run, these are `raw_test` and `metadata_test`.
 - The raw table includes `event_id`, `study_run_id`, `participant_id`, `room_id`, `room_code`, `event_type`, `dialogue_number`, `turn_number`, `occurred_at`, `started_at`, `ended_at`, `duration_seconds`, and `event_data`. Fields that do not apply to an event are nullable. `study_run_id` is assigned by the table's default and is not sent by the server.
@@ -197,25 +199,25 @@ The following is the agreed target design for a later storage change; the curren
 - `room_paired` records both stable participant IDs, their assigned roles, the assigned `condition`, `room_id`, and generated `room_code`. `dialogue_started` records the start of each dialogue. Each `message_sent` records its stable participant ID, role, dialogue number, and turn number. Judgement and page-visit intervals use `started_at`, `ended_at`, and `duration_seconds` where needed for the final exports.
 - The metadata table stores the run ID, creation time, schema and protocol versions, application revision, and an immutable configuration snapshot. It records protocol/configuration such as dialogue and question counts, screening version, allowed question types, and the condition-allocation rule; it must not contain secrets or participant-level assignments.
 - Participant and room CSVs are derived from raw events, not maintained as separate source tables. The room-wide export remains one row per dialogue, with columns such as `interviewer_message_5`, `question_type_interviewer_message_5`, and `interviewee_message_5`; `dialogue_number` identifies which dialogue that row represents. Output headers use lowercase `snake_case`, including `interviewee_participant_id` and `judgement`.
-- The future initializer will validate a run ID, create the two run-specific tables, and write the metadata snapshot. Exports will go directly under `/var/lib/study2/exports/` with the run ID in their filenames; the live SQLite database remains separately under `/var/lib/study2/`. Initialization, raw-event persistence, and export are not implemented yet.
+- Initialize a run with `flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1`. The command validates the run ID, creates `raw_test` and `metadata_test`, and stores the immutable configuration snapshot. Repeating it with matching configuration is safe; it refuses changed metadata or partial schemas.
+- Exports are written directly under `/var/lib/study2/exports/`, with a run ID and timestamp in each filename. The live SQLite database is `/var/lib/study2/study2.sqlite`; table names are inside that database file.
 
 #### Export CSV and JSON files from the VPS
 
-Run these commands in a terminal on your Mac from any directory. They connect to the VPS, create an export in a private directory outside the web checkout, then download that directory to `~/study2-exports/`. The timestamped name allows repeat exports without overwriting earlier ones.
+Run these commands in a terminal on your Mac from any directory. They connect to the VPS, write timestamped TEST-run exports directly into the shared private exports directory, then download its contents to `~/study2-exports/`.
 
 ```sh
-EXPORT_NAME="study2-$(date +%Y-%m-%d-%H%M%S)"
-ssh root@157.90.127.76 "install -d -o www-data -g www-data -m 0750 /var/lib/study2/test/exports && cd /var/www/study2 && sudo -u www-data env STUDY_DATASET=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/test/study2-test.sqlite .venv/bin/flask --app server export-study --output /var/lib/study2/test/exports/$EXPORT_NAME --dataset test"
+ssh root@157.90.127.76 "cd /var/www/study2 && sudo -u www-data env STUDY_DATASET=test STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server export-study --output /var/lib/study2/exports --run-id test"
 mkdir -p -m 700 "$HOME/study2-exports"
-scp -r "root@157.90.127.76:/var/lib/study2/test/exports/$EXPORT_NAME" "$HOME/study2-exports/"
+scp -r "root@157.90.127.76:/var/lib/study2/exports/." "$HOME/study2-exports/"
 ```
 
-The downloaded folder contains `participants.csv`, `rooms.csv`, `participants.json`, `rooms.json`, `complete.json`, and a `rooms/` directory with one JSON file per room. Open the CSV files in a spreadsheet application or use the JSON files for structured data processing. These exports contain research data: keep them private, do not commit them to Git, and do not put them in a public web directory. The SSH command may prompt for your server login; enter credentials only in your terminal.
+Each export creates `participants_test_<timestamp>.csv`, `rooms_test_<timestamp>.csv`, corresponding JSON files, and one flat JSON file per room. Existing legacy export bundles, if present during deployment, are retained under `legacy_test_exports/`. These exports contain research data: keep them private, do not commit them to Git, and do not put them in a public web directory. The SSH command may prompt for your server login; enter credentials only in your terminal.
 
 To download the raw SQLite database instead, use this separate command (it does not generate CSV/JSON files):
 
 ```sh
-scp root@157.90.127.76:/var/lib/study2/test/study2-test.sqlite "$HOME/study2-test.sqlite"
+scp root@157.90.127.76:/var/lib/study2/study2.sqlite "$HOME/study2.sqlite"
 ```
 
 If the database may be receiving writes while you copy it, prefer the export steps above so the app creates a consistent set of CSV/JSON files using SQLite's normal database connection.
@@ -234,28 +236,32 @@ Study 2 is deployed from the public Git repository `https://github.com/Lucca878/
 
 #### One-time environment configuration for verification (manual, not performed here)
 
-[deploy/study2.service](deploy/study2.service) includes the optional systemd directive
-`EnvironmentFile=-/etc/study2.env`. Create that environment file on the server as
-root-owned, mode **0600**, outside the checkout, and enter the variables listed above
-there using systemd `NAME=value` syntax (no `export`). Keep all private values out of
-Git, screenshots and command history. The leading minus makes the file optional:
-without an explicit enable setting the feature remains **off**, not auto-enabled.
-Schedule activation outside participant sessions: restarting clears rooms and chats.
+[deploy/study2.service](deploy/study2.service) reads the optional systemd environment
+file `/etc/study2.env` for the private Turnstile credentials, allowlist, and stable
+Flask signing key. Create that file on the server as root-owned, mode **0600**, outside
+the checkout, using systemd `NAME=value` syntax (no `export`). Keep private values out
+of Git, screenshots, and command history. The service forces `TURNSTILE_ENABLED=true`;
+if required verification configuration is absent or invalid, participants receive a
+closed 503 response instead of bypassing the challenge. Schedule deployment outside
+participant sessions because restarting clears active rooms and chats.
 
 The deployment script installs the unit and reloads systemd. For a manual unit edit,
 copy `deploy/study2.service` to `/etc/systemd/system/study2.service`, then run
 `systemctl daemon-reload` and restart the service. Check
 `systemctl status study2.service --no-pager` without dumping environment secrets.
-After later edits to the environment file, restart the service. The unit labels stored study data as `test` and
-points SQLite to `/var/lib/study2/test/study2-test.sqlite`, outside the checkout. The
-deployment script creates this directory with `www-data` ownership, installs the unit,
-reloads systemd, and runs `flask db upgrade` against that explicit TEST path before
-restarting the app. Running locally without `STUDY_DATABASE_URL` uses ephemeral
+After later edits to the environment file, restart the service. The unit labels the run
+`test` and points SQLite to `/var/lib/study2/study2.sqlite`, outside the checkout. The
+deployment script creates the shared database and exports directories, runs
+`flask db upgrade`, and initializes `raw_test` and `metadata_test` before restarting.
+This is an intentional fresh start: it removes the old
+`/var/lib/study2/test/study2-test.sqlite` database and its SQLite sidecars. Any old
+export bundles are moved to `/var/lib/study2/exports/legacy_test_exports/`; the script
+removes the old `test` directory only if it is empty, failing rather than recursively
+deleting unexpected files. Running locally without `STUDY_DATABASE_URL` uses ephemeral
 in-memory SQLite; it creates no persistent local database file. The database file is
-runtime data and is not committed. The initial schema is managed by Flask-Migrate, and
-valid feedback submissions archive completed room records to SQLite. Export the archive
-separately with the CLI described above. No production keys or configuration are supplied
-by this repo.
+runtime data and is not committed. The compatibility schema remains managed by
+Flask-Migrate, and valid feedback submissions still archive there until raw event
+recording is implemented. No production keys or configuration are supplied by this repo.
 
 First, test the change locally, then commit and push it to the `main` branch.
 From the repository root on your Mac, run:
@@ -265,8 +271,9 @@ sh deploy.sh
 ```
 
 The script connects to the VPS over SSH, pulls the latest changes in `/var/www/study2`,
-creates the private TEST database directory, installs the updated systemd unit and
-dependencies, builds the frontend, restarts `study2.service`, and displays its status.
+installs the updated systemd unit and dependencies, builds the frontend, performs the
+documented fresh-start database reset, initializes the TEST run tables, restarts
+`study2.service`, and displays its status.
 It stops if a command fails. SSH access to `root@157.90.127.76` is required;
 enter any SSH password or key passphrase directly in your terminal if prompted.
 Restarting clears all active rooms and chats. After deployment, check the site at

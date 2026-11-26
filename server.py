@@ -18,6 +18,7 @@ from flask import Flask, jsonify, redirect, render_template, request, session, u
 from app.database import db, migrate
 from app import database as _database_models  # Register tables so Flask-Migrate can inspect the complete schema.
 from app.study_data import archive_completed_room, record_prolific_handoff, register_study_data
+from app.run_tables import register_run_table_commands
 from city_candidates import CANDIDATE_CITIES
 
 app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
@@ -33,6 +34,8 @@ app.config.update(
     PROLIFIC_COMPLETION_URL=environ.get("PROLIFIC_COMPLETION_URL", "https://www.prolific.com/").strip(),
     # Label this initial archive as test data and permit an explicit VPS database URL override.
     STUDY_DATASET=environ.get("STUDY_DATASET", "test").strip().lower() or "test",
+    # Name the run-specific raw and metadata tables; keep this distinct from legacy archive filtering during migration.
+    STUDY_RUN_ID=environ.get("STUDY_RUN_ID", "test").strip().lower() or "test",
     # Local use is ephemeral; the VPS service explicitly supplies its persistent TEST database URL.
     SQLALCHEMY_DATABASE_URI=environ.get("STUDY_DATABASE_URL", "sqlite:///:memory:"),
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
@@ -41,6 +44,7 @@ app.config.update(
 db.init_app(app)
 migrate.init_app(app, db)
 register_study_data(app)
+register_run_table_commands(app)
 # A generated development key must never count as a configured verification key.
 app.config["SECRET_KEY"] = app.config["FLASK_SECRET_KEY"] or (
     None if app.config["TURNSTILE_ENABLED"] else token_hex(32)
