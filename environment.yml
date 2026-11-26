@@ -4,7 +4,5 @@ channels:
 dependencies:
   - python=3.12
   - flask
-  # Include the ORM, Flask integration, and migration CLI in the local Conda environment.
   - flask-sqlalchemy=3.1.1
-  - flask-migrate=4.1.0
   - sqlalchemy=2.1.9

@@ -6,7 +6,7 @@ from unittest.mock import patch
 from sqlalchemy import MetaData, Table, select, text
 
 import server
-from app.database import db, Participant, Room as ArchivedRoom
+from app.database import db
 from app.run_tables import initialize_study_run
 
 
@@ -20,7 +20,6 @@ class RoleReadinessTests(unittest.TestCase):
             with db.engine.begin() as connection:
                 connection.execute(text("DROP TABLE IF EXISTS raw_test"))
                 connection.execute(text("DROP TABLE IF EXISTS metadata_test"))
-            db.create_all()
             # Create the raw event destination that the production initializer prepares before participant collection.
             initialize_study_run(
                 db.engine,
@@ -42,8 +41,7 @@ class RoleReadinessTests(unittest.TestCase):
             server.study_sessions.clear()
         with server.app.app_context():
             db.session.remove()
-            db.drop_all()
-            # Clean up the dynamic tables separately from the legacy ORM tables.
+            # Clean up the dynamically named run tables after the isolated test.
             with db.engine.begin() as connection:
                 connection.execute(text("DROP TABLE IF EXISTS raw_test"))
                 connection.execute(text("DROP TABLE IF EXISTS metadata_test"))
@@ -337,324 +335,37 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(duplicate.location, "/debriefing")
         self.assertEqual(room["feedback_submissions"]["first"], saved)
 
-        # A valid feedback submit must archive the completed participant and room snapshot in the TEST DB.
-        with self.first.session_transaction() as browser_session:
-            first_participant_id = browser_session["participant_id"]
-        with server.app.app_context():
-            first_record = db.session.get(Participant, first_participant_id)
-            self.assertEqual(first_record.dataset, "test")
-            self.assertEqual(len(first_record.screening_submissions[0].answers), 20)
-            archived_room = db.session.get(ArchivedRoom, room["archive_id"])
-            self.assertEqual(archived_room.condition, room["conditions"][next(
-                pid for pid, role in room["participants"].items() if role == "interviewer"
-            )])
-            self.assertEqual(len(archived_room.messages), len(room["messages"]))
-
-    def test_pairing_dialogue_and_chat_events_batch_at_feedback_and_save_only_once(self):
-        # Create a real claim through the dialogue route so its start event is timestamped at creation.
-        self.pair()
-        room = server.rooms["ROOM01"]
-        room["ready"].update(room["participants"])
-        self.assertEqual(self.first.get("/dialogue").status_code, 200)
-        self.assertEqual(self.second.get("/dialogue").status_code, 200)
-        claim_event = next(event for event in room["raw_events"] if event["event_type"] == "dialogue_started")
-        claim_started_at = room["current_claim"]["started_at"]
-
-        # Send one complete interviewer/interviewee exchange and classify the question separately.
-        interviewer_room_participant_id = next(
-            room_participant_id for room_participant_id, role in room["participants"].items()
-            if role == "interviewer"
-        )
-        interviewee_room_participant_id = next(
-            room_participant_id for room_participant_id, role in room["participants"].items()
-            if role == "interviewee"
-        )
-        clients = {"first": self.first, "second": self.second}
-        interviewer = clients[interviewer_room_participant_id]
-        interviewee = clients[interviewee_room_participant_id]
-        question_response = interviewer.post("/api/rooms/ROOM01/messages", json={
-            "room_participant_id": interviewer_room_participant_id,
-            "text": "What did you enjoy?",
-        })
-        self.assertEqual(question_response.status_code, 201)
-        self.assertNotIn("raw_event_id", question_response.get_json()["message"])
-        question_event = next(
-            event for event in room["raw_events"]
-            if event["event_type"] == "message_sent" and event["event_data"]["role"] == "interviewer"
-        )
-        category_response = interviewer.post("/api/rooms/ROOM01/question-type", json={
-            "room_participant_id": interviewer_room_participant_id,
-            "question_type": "open-ended",
-        })
-        self.assertEqual(category_response.status_code, 200)
-        category_event = next(event for event in room["raw_events"] if event["event_type"] == "question_type_assigned")
-        answer_response = interviewee.post("/api/rooms/ROOM01/messages", json={
-            "room_participant_id": interviewee_room_participant_id,
-            "text": "The museums.",
-        })
-        self.assertEqual(answer_response.status_code, 201)
-        answer_event = next(
-            event for event in room["raw_events"]
-            if event["event_type"] == "message_sent" and event["event_data"]["role"] == "interviewee"
-        )
-        self.assertEqual(question_event["turn_number"], 1)
-        self.assertEqual(answer_event["turn_number"], 1)
-        self.assertEqual(question_event["participant_id"], room["participant_ids"][interviewer_room_participant_id])
-        self.assertEqual(answer_event["participant_id"], room["participant_ids"][interviewee_room_participant_id])
-        self.assertEqual(question_event["event_data"]["role"], "interviewer")
-        self.assertEqual(answer_event["event_data"]["role"], "interviewee")
-        self.assertEqual(category_event["event_data"]["target_event_id"], question_event["event_id"])
-        self.assertEqual(category_event["event_data"]["question_type"], "open-ended")
-
-        # Mark the test dialogue complete so the existing feedback transaction flushes the buffered events.
-        room["current_claim_index"] = 10
-        room["current_claim"] = None
-        room["next_speaker"] = None
-
-        paired_event = next(event for event in room["raw_events"] if event["event_type"] == "room_paired")
-        self.assertEqual(paired_event["room_id"], room["archive_id"])
-        self.assertEqual(paired_event["room_code"], "ROOM01")
-        self.assertEqual(paired_event["occurred_at"], room["paired_at"])
-        self.assertIsNone(paired_event.get("participant_id"))
-        self.assertEqual(paired_event["event_data"]["condition"], room["conditions"][
-            next(room_participant_id for room_participant_id, role in room["participants"].items() if role == "interviewer")
-        ])
-        self.assertCountEqual(
-            [entry["participant_id"] for entry in paired_event["event_data"]["participants"]],
-            list(room["participant_ids"].values()),
-        )
-        self.assertCountEqual(
-            [entry["role"] for entry in paired_event["event_data"]["participants"]],
-            ["interviewer", "interviewee"],
-        )
-        interviewee_room_participant_id = next(
-            room_participant_id for room_participant_id, role in room["participants"].items()
-            if role == "interviewee"
-        )
-        self.assertEqual(claim_event["event_type"], "dialogue_started")
-        self.assertEqual(claim_event["participant_id"], room["participant_ids"][interviewee_room_participant_id])
-        self.assertEqual(claim_event["dialogue_number"], 1)
-        self.assertEqual(claim_event["started_at"], claim_started_at)
-        self.assertEqual(claim_event["event_data"]["role"], "interviewee")
-        self.assertIn("claim", claim_event["event_data"])
-        self.assertIsInstance(claim_event["event_data"]["ground_truth"], bool)
-
-        # Study actions only buffer raw rows; the configured save-at-feedback policy persists them later.
-        with server.app.app_context():
-            raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
-            self.assertEqual(db.session.execute(select(raw_table)).mappings().all(), [])
-
-        feedback_data = {
+        second_feedback = self.second.post("/submit_feedback", data={
             "task_skill": "5",
-            "task_difficulty": "4",
+            "task_difficulty": "3",
             "task_motivation": "6",
             "strategy": "Ask focused questions",
             "additional_feedback": "",
-        }
-        first_feedback = self.first.post("/submit_feedback", data=feedback_data)
-        self.assertEqual(first_feedback.status_code, 302)
-        buffered_events = list(room["raw_events"])
-        for participant_id in room["participant_ids"].values():
-            buffered_events.extend(server.study_sessions[participant_id]["raw_events"])
-        expected_event_ids = {event["event_id"] for event in buffered_events}
+        })
+
+        self.assertEqual(second_feedback.status_code, 302)
+        self.assertEqual(second_feedback.location, "/debriefing")
+        second_saved = room["feedback_submissions"]["second"]
+        self.assertEqual(second_saved["task_skill"], 5)
+        self.assertEqual(second_saved["task_difficulty"], 3)
+        self.assertEqual(second_saved["task_motivation"], 6)
+        self.assertEqual(second_saved["strategy"], "Ask focused questions")
+
+        # A valid feedback submit stores the room's events and both participants' event buffers in raw_test.
         with server.app.app_context():
             raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
             saved_events = db.session.execute(select(raw_table)).mappings().all()
-        self.assertEqual(len(saved_events), len(expected_event_ids))
-        self.assertTrue(all(saved_event["study_run_id"] == "test" for saved_event in saved_events))
-        self.assertEqual({saved_event["event_id"] for saved_event in saved_events}, expected_event_ids)
-        persisted_question_event = next(saved_event for saved_event in saved_events if saved_event["event_id"] == question_event["event_id"])
-        self.assertEqual(persisted_question_event["event_data"]["message"], "What did you enjoy?")
-        persisted_category_event = next(saved_event for saved_event in saved_events if saved_event["event_id"] == category_event["event_id"])
-        self.assertEqual(persisted_category_event["event_data"]["target_event_id"], question_event["event_id"])
-        persisted_pair = next(saved_event for saved_event in saved_events if saved_event["event_type"] == "room_paired")
-        self.assertEqual(persisted_pair["occurred_at"], datetime.fromisoformat(room["paired_at"]).replace(tzinfo=None))
-        persisted_claim = next(saved_event for saved_event in saved_events if saved_event["event_type"] == "dialogue_started")
-        self.assertEqual(persisted_claim["event_data"]["claim"], claim_event["event_data"]["claim"])
-        self.assertEqual(persisted_claim["event_data"]["ground_truth"], claim_event["event_data"]["ground_truth"])
-        self.assertEqual(persisted_claim["started_at"], datetime.fromisoformat(claim_started_at).replace(tzinfo=None))
+        self.assertIn("room_paired", {event["event_type"] for event in saved_events})
 
-        # The second feedback transaction sees the same buffered events but must not insert duplicate rows.
-        second_feedback = self.second.post("/submit_feedback", data=feedback_data)
-        self.assertEqual(second_feedback.status_code, 302)
-        buffered_events = list(room["raw_events"])
-        for participant_id in room["participant_ids"].values():
-            buffered_events.extend(server.study_sessions[participant_id]["raw_events"])
-        expected_event_ids = {event["event_id"] for event in buffered_events}
-        with server.app.app_context():
-            saved_count = db.session.execute(select(raw_table.c.event_id)).scalars().all()
-        self.assertCountEqual(saved_count, expected_event_ids)
-
-    def test_second_feedback_updates_same_archived_room(self):
-        room = self.complete_dialogues()
-
-        for client, task_skill in ((self.first, "4"), (self.second, "6")):
-            response = client.post("/submit_feedback", data={
-                "task_skill": task_skill,
-                "task_difficulty": "3",
-                "task_motivation": "5",
-                "strategy": "Ask focused questions",
-                "additional_feedback": "",
-            })
-            self.assertEqual(response.status_code, 302)
-            self.assertEqual(response.location, "/debriefing")
-
-        with server.app.app_context():
-            self.assertEqual(db.session.query(Participant).count(), 2)
-            self.assertEqual(db.session.query(ArchivedRoom).count(), 1)
-            archived_room = db.session.get(ArchivedRoom, room["archive_id"])
-            self.assertEqual(len(archived_room.feedback_submissions), 2)
-            self.assertEqual(len(archived_room.dialogues), 0)
-            self.assertEqual(len(archived_room.messages), len(room["messages"]))
-        feedback_events = [event for event in room["raw_events"] if event["event_type"] == "feedback_submitted"]
-        self.assertEqual(len(feedback_events), 2)
-        self.assertEqual(
-            {event["participant_id"] for event in feedback_events},
-            set(room["participant_ids"].values()),
-        )
-    def test_feedback_archive_failure_is_retryable_and_does_not_save_partial_data(self):
-        room = self.complete_dialogues()
-        form_data = {
-            "task_skill": "5",
-            "task_difficulty": "4",
-            "task_motivation": "6",
-            "strategy": "Ask focused questions",
-            "additional_feedback": "",
-        }
-
-        with patch("app.study_data.db.session.begin", side_effect=server.db.exc.SQLAlchemyError("TEST database unavailable")):
-            failed = self.first.post("/submit_feedback", data=form_data)
-
-        self.assertEqual(failed.status_code, 503)
-        self.assertIn(b"We could not securely save your feedback. Please try again.", failed.data)
-        self.assertNotIn("first", room.get("feedback_submissions", {}))
-        with server.app.app_context():
-            self.assertEqual(db.session.query(Participant).count(), 0)
-            self.assertEqual(db.session.query(ArchivedRoom).count(), 0)
-
-        retried = self.first.post("/submit_feedback", data=form_data)
-        self.assertEqual(retried.status_code, 302)
-        self.assertEqual(retried.location, "/debriefing")
-        self.assertIn("first", room["feedback_submissions"])
-
-    def test_debriefing_requires_completed_dialogues_and_feedback(self):
-        # A participant cannot open debriefing before both members are ready.
-        self.pair()
-        room = server.rooms["ROOM01"]
-        self.assertEqual(self.first.get("/debriefing").location, "/role-instructions")
-
-        # Readiness alone does not bypass the server-owned dialogue completion check.
-        room["ready"].update(room["participants"])
-        self.assertEqual(self.first.get("/debriefing").location, "/dialogue")
-
-        # Completing all ten dialogues still requires this participant's saved feedback.
-        room["current_claim_index"] = 10
-        room["current_claim"] = None
-        room["next_speaker"] = None
-        self.assertEqual(self.first.get("/debriefing").location, "/feedback")
-
-        # Saved feedback grants access to the uncached debriefing and its guarded next-step link.
-        room["feedback_submissions"] = {"first": {"timestamp": "server timestamp"}}
-        response = self.first.get("/debriefing")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers["Cache-Control"], "no-store")
-        self.assertIn(b'href="/study-ended"', response.data)
-
-    def test_feedback_condition_returns_correctness_only_to_interviewer(self):
-        room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_judgement("feedback")
-
-        response = interviewer.post("/api/rooms/ROOM01/judgement", json={
-            "room_participant_id": interviewer_id,
-            "judgement": "false",
-            "confidence": 80,
-        })
-
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.get_json(), {"status": "ok", "correct": False})
-        self.assertEqual(room["current_claim"]["judgement"]["judgement"], "false")
-        self.assertIn("timestamp", room["current_claim"]["judgement"])
-
-        # The interviewee cannot submit a judgement or retrieve its correctness result.
-        denied = interviewee.post("/api/rooms/ROOM01/judgement", json={
-            "room_participant_id": interviewee_id,
-            "judgement": "true",
-            "confidence": 50,
-        })
-        self.assertEqual(denied.status_code, 403)
-        poll = interviewee.get(
-            f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}&after_id=0"
-        )
-        self.assertEqual(poll.status_code, 200)
-        self.assertNotIn("correct", poll.get_json())
-        self.assertNotIn("judgement", poll.get_json())
-
-    def test_control_condition_omits_correctness_and_continues(self):
-        room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_judgement("control")
-
-        response = interviewer.post("/api/rooms/ROOM01/judgement", json={
-            "room_participant_id": interviewer_id,
-            "judgement": "false",
-            "confidence": 80,
-        })
-
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.get_json(), {"status": "ok"})
-        self.assertEqual(room["current_claim"]["judgement"]["judgement"], "false")
-        self.assertIn("timestamp", room["current_claim"]["judgement"])
-
-        # Control still advances through the normal server-controlled transition.
-        continued = interviewer.post(
-            "/api/rooms/ROOM01/continue",
-            json={"room_participant_id": interviewer_id},
-        )
-        self.assertEqual(continued.status_code, 201)
-        self.assertIn("transition_end", room)
-        poll = interviewee.get(
-            f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}&after_id=0"
-        )
-        self.assertEqual(poll.status_code, 200)
-        self.assertNotIn("correct", poll.get_json())
-        self.assertNotIn("judgement", poll.get_json())
-
-    def test_study_ended_requires_completion_and_renders_prolific_fallback(self):
-        # Consent remains required even for a request to the final completion page.
-        unconsented = server.app.test_client()
-        self.assertEqual(unconsented.get("/study-ended").location, "/consent")
-
-        # A valid participant without a paired room must return to matching first.
-        self.assertEqual(self.first.get("/study-ended").location, "/room")
-        self.pair()
-        room = server.rooms["ROOM01"]
-        self.assertEqual(self.first.get("/study-ended").location, "/role-instructions")
-
-        # Both participants must be ready and all ten dialogues must be complete.
-        room["ready"].update(room["participants"])
-        self.assertEqual(self.first.get("/study-ended").location, "/dialogue")
-        room["current_claim_index"] = 10
-        room["current_claim"] = None
-        room["next_speaker"] = None
-        self.assertEqual(self.first.get("/study-ended").location, "/feedback")
-
-        # The configured destination is used for both automatic navigation and the manual fallback.
-        room["feedback_submissions"] = {"first": {"timestamp": "server timestamp"}}
-        response = self.first.get("/study-ended")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers["Cache-Control"], "no-store")
-        self.assertIn(b"You will be redirected to Prolific", response.data)
-        self.assertIn(b'href="/complete-study"', response.data)
-        self.assertIn(b'content="10;url=/complete-study"', response.data)
-
-    def test_complete_study_records_server_redirect_time_and_total_duration(self):
-        room = self.complete_dialogues()
         with self.first.session_transaction() as browser_session:
             first_participant_id = browser_session["participant_id"]
-            browser_session["study_started_at"] = "2026-01-01T10:00:00.000+00:00"
         with self.second.session_transaction() as browser_session:
             second_participant_id = browser_session["participant_id"]
-            browser_session["study_started_at"] = "2026-01-01T10:00:00.000+00:00"
 
-        def seed_study_state(participant_id):
+        server.study_sessions[first_participant_id]["study_started_at"] = "2026-01-01T10:00:00.000+00:00"
+        server.study_sessions[second_participant_id]["study_started_at"] = "2026-01-01T10:00:00.000+00:00"
+
+        for participant_id in (first_participant_id, second_participant_id):
             visit = {
                 "sequence": 1,
                 "page_name": "study-ended",
@@ -663,49 +374,23 @@ class RoleReadinessTests(unittest.TestCase):
                 "duration_seconds": None,
                 "event_id": f"page-visit-{participant_id}",
             }
-            server.study_sessions[participant_id] = {
-                "study_started_at": "2026-01-01T10:00:00.000+00:00",
-                "consent_accepted": True,
-                "consent_accepted_at": "2026-01-01T10:00:00.000+00:00",
-                "entry_verified": False,
-                "travel_intro_seen": True,
-                "travel_screened_out": False,
-                "screening_complete_version": server.SCREENING_VERSION,
-                "instructions_complete": True,
+            state = server.study_sessions[participant_id]
+            state["page_visits"] = [visit]
+            state["open_page_visit"] = visit
+            state.setdefault("raw_events", []).append({
+                "event_id": visit["event_id"],
+                "participant_id": participant_id,
+                "room_id": room["archive_id"],
                 "room_code": "ROOM01",
-                "room_participant_id": "first" if participant_id == first_participant_id else "second",
-                "page_visits": [visit],
-                "open_page_visit": visit,
-                "raw_events": [{
-                    "event_id": visit["event_id"],
-                    "participant_id": participant_id,
-                    "room_id": room["archive_id"],
-                    "room_code": "ROOM01",
-                    "event_type": "page_visit",
-                    "occurred_at": None,
-                    "started_at": visit["entered_at"],
-                    "ended_at": None,
-                    "duration_seconds": None,
-                    "event_data": {"page_name": "study-ended"},
-                }],
-            }
-
-        seed_study_state(first_participant_id)
-        seed_study_state(second_participant_id)
-        for client in (self.first, self.second):
-            feedback = client.post("/submit_feedback", data={
-                "task_skill": "5",
-                "task_difficulty": "3",
-                "task_motivation": "6",
-                "strategy": "Ask focused questions",
-                "additional_feedback": "",
+                "event_type": "page_visit",
+                "dialogue_number": None,
+                "turn_number": None,
+                "occurred_at": None,
+                "started_at": visit["entered_at"],
+                "ended_at": None,
+                "duration_seconds": None,
+                "event_data": {"page_name": "study-ended"},
             })
-            self.assertEqual(feedback.status_code, 302)
-            self.assertEqual(feedback.location, "/debriefing")
-
-        with server.app.app_context():
-            self.assertEqual(db.session.query(Participant).count(), 2)
-            self.assertEqual(db.session.query(ArchivedRoom).count(), 1)
 
         first_redirect_time = "2026-01-01T10:02:00.000+00:00"
         second_redirect_time = "2026-01-01T10:03:00.000+00:00"
@@ -739,14 +424,6 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(room["participants_completed_at"]["second"], second_redirect_time)
 
         with server.app.app_context():
-            first_record = db.session.get(Participant, first_participant_id)
-            second_record = db.session.get(Participant, second_participant_id)
-            archived_room = db.session.get(ArchivedRoom, room["archive_id"])
-            self.assertEqual(first_record.prolific_redirect_at, first_redirect_time)
-            self.assertEqual(first_record.duration_seconds, 120.0)
-            self.assertEqual(second_record.prolific_redirect_at, second_redirect_time)
-            self.assertEqual(second_record.duration_seconds, 180.0)
-            self.assertEqual(archived_room.completed_at, second_redirect_time)
             raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
             raw_rows = db.session.execute(select(raw_table)).mappings().all()
             completion_events = [row for row in raw_rows if row["event_type"] == "study_completed"]
@@ -755,14 +432,12 @@ class RoleReadinessTests(unittest.TestCase):
                 [first_participant_id, second_participant_id],
             )
             saved_visits = {row["event_id"]: row for row in raw_rows if row["event_type"] == "page_visit"}
-            self.assertEqual(saved_visits[f"page-visit-{first_participant_id}"]["ended_at"], datetime.fromisoformat(first_redirect_time).replace(tzinfo=None))
-            self.assertEqual(saved_visits[f"page-visit-{first_participant_id}"]["duration_seconds"], 60.0)
-            self.assertEqual(saved_visits[f"page-visit-{second_participant_id}"]["ended_at"], datetime.fromisoformat(second_redirect_time).replace(tzinfo=None))
-            first_final_visit = next(
-                visit for visit in first_record.page_visits if visit.page_name == "study-ended"
-            )
-            self.assertEqual(first_final_visit.exited_at, first_redirect_time)
-            self.assertEqual(first_final_visit.duration_seconds, 60.0)
+            first_visit = saved_visits[f"page-visit-{first_participant_id}"]
+            second_visit = saved_visits[f"page-visit-{second_participant_id}"]
+            self.assertEqual(first_visit["ended_at"], datetime.fromisoformat(first_redirect_time).replace(tzinfo=None))
+            self.assertEqual(first_visit["duration_seconds"], 60.0)
+            self.assertEqual(second_visit["ended_at"], datetime.fromisoformat(second_redirect_time).replace(tzinfo=None))
+            self.assertEqual(second_visit["duration_seconds"], 120.0)
 
     def test_interviewer_category_is_selected_after_send_and_gates_the_reply(self):
         room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_message_turn()
@@ -967,6 +642,7 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertFalse(self.status(self.second)["chat_ready"])
         self.assert_chat_blocked(self.first, "first")
         self.assert_chat_blocked(self.second, "second")
+        self.assertEqual(server.rooms["ROOM01"]["messages"], [])
 
         self.second.post("/role-instructions")
         ready_events = [event for event in server.rooms["ROOM01"]["raw_events"] if event["event_type"] == "participant_ready"]

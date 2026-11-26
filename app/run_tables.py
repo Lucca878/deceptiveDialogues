@@ -188,6 +188,14 @@ def insert_raw_events(connection: Connection, run_id: str, events: list[dict[str
     return len(rows)
 
 
+def persist_raw_events(engine: Engine, run_id: str, events: list[dict[str, Any]]) -> int:
+    """Commit one buffered event batch atomically to the selected raw run table."""
+    if not events:
+        return 0
+    with engine.begin() as connection:
+        return insert_raw_events(connection, run_id, events)
+
+
 def _load_configuration(path: Path) -> dict[str, Any]:
     """Load a JSON object while rejecting likely credentials from run metadata."""
     try:

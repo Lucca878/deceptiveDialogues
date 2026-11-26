@@ -27,10 +27,8 @@ rm -f /var/lib/study2/test/study2-test.sqlite /var/lib/study2/test/study2-test.s
 if [ -d /var/lib/study2/test ]; then
 	rmdir /var/lib/study2/test
 fi
-# Create the legacy compatibility schema as the service account in the shared database file.
-sudo -u www-data env STUDY_DATASET=test STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server db upgrade
 # Initialize the run-specific raw and metadata tables; the command refuses incompatible existing metadata.
-sudo -u www-data env TURNSTILE_ENABLED=true STUDY_DATASET=test STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1 --application-revision "$(git rev-parse --short HEAD)"
+sudo -u www-data env TURNSTILE_ENABLED=true STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1 --application-revision "$(git rev-parse --short HEAD)"
 # Keep the newly created SQLite database private and writable by the service account.
 chown www-data:www-data /var/lib/study2/study2.sqlite
 chmod 0640 /var/lib/study2/study2.sqlite
@@ -55,8 +53,7 @@ REMOTE
 #   move /var/lib/study2/test/exports/* into /var/lib/study2/exports/legacy_test_exports — preserve existing export bundles under the common root.
 #   rm -f /var/lib/study2/test/study2-test.sqlite and its -wal/-shm files — discard the old TEST database and SQLite sidecars for a fresh collection.
 #   rmdir /var/lib/study2/test — remove only the empty legacy directory; unexpected files are not recursively deleted.
-#   sudo -u www-data env STUDY_DATASET=test STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server db upgrade — create the compatibility schema in the shared database.
-#   sudo -u www-data env STUDY_DATASET=test STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1 — create raw_test and metadata_test.
+#   sudo -u www-data env STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1 — create raw_test and metadata_test.
 #   chown www-data:www-data /var/lib/study2/study2.sqlite; chmod 0640 /var/lib/study2/study2.sqlite — restrict the database file to the service account and group.
 #   systemctl restart study2.service — restart the application service to load the update; active in-memory rooms and chats are cleared.
 #   systemctl status study2.service --no-pager — show whether the service is running without opening a pager.

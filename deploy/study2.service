@@ -11,8 +11,7 @@ Environment=PYTHONUNBUFFERED=1
 # The deployed participant run always requires entry verification; secrets and host allowlists remain external.
 EnvironmentFile=-/etc/study2.env
 Environment=TURNSTILE_ENABLED=true
-# Keep the initial collection's run ID and database location explicit and outside the checkout.
-Environment=STUDY_DATASET=test
+# Keep the collection run ID and database location explicit and outside the checkout.
 Environment=STUDY_RUN_ID=test
 Environment=STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite
 ExecStart=/var/www/study2/.venv/bin/gunicorn --workers 1 --threads 4 --bind 127.0.0.1:8001 --access-logfile - --error-logfile - server:app

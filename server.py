@@ -14,11 +14,11 @@ from urllib.request import Request, urlopen
 from random import sample, shuffle
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from sqlalchemy.exc import SQLAlchemyError
 
-from app.database import db, migrate
-from app import database as _database_models  # Register tables so Flask-Migrate can inspect the complete schema.
-from app.study_data import archive_completed_room, record_prolific_handoff, register_study_data
-from app.run_tables import register_run_table_commands
+from app.database import db
+from app.run_tables import persist_raw_events, register_run_table_commands
+from app.raw_exports import register_raw_export_command
 from city_candidates import CANDIDATE_CITIES
 
 app = Flask(__name__, template_folder="app/templates", static_folder="app/static")
@@ -30,21 +30,15 @@ app.config.update(
         host.strip() for host in environ.get("TURNSTILE_HOSTNAMES", "").split(",") if host.strip()
     })),
     FLASK_SECRET_KEY=environ.get("FLASK_SECRET_KEY", "").strip(),
-    # Keep the destination configurable so the approved Prolific completion URL can replace this temporary general link.
     PROLIFIC_COMPLETION_URL=environ.get("PROLIFIC_COMPLETION_URL", "https://www.prolific.com/").strip(),
-    # Label this initial archive as test data and permit an explicit VPS database URL override.
-    STUDY_DATASET=environ.get("STUDY_DATASET", "test").strip().lower() or "test",
-    # Name the run-specific raw and metadata tables; keep this distinct from legacy archive filtering during migration.
     STUDY_RUN_ID=environ.get("STUDY_RUN_ID", "test").strip().lower() or "test",
-    # Local use is ephemeral; the VPS service explicitly supplies its persistent TEST database URL.
     SQLALCHEMY_DATABASE_URI=environ.get("STUDY_DATABASE_URL", "sqlite:///:memory:"),
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
 )
-# Bind Flask-SQLAlchemy and Flask-Migrate after configuring the app; no tables or study rows are created yet.
+# Bind Flask-SQLAlchemy after configuring the app; run tables are created explicitly during deployment and tests.
 db.init_app(app)
-migrate.init_app(app, db)
-register_study_data(app)
 register_run_table_commands(app)
+register_raw_export_command(app)
 # A generated development key must never count as a configured verification key.
 app.config["SECRET_KEY"] = app.config["FLASK_SECRET_KEY"] or (
     None if app.config["TURNSTILE_ENABLED"] else token_hex(32)
@@ -855,7 +849,6 @@ def complete_study():
                         raw_visit_event["ended_at"] = redirect_at
                         raw_visit_event["duration_seconds"] = final_visit["duration_seconds"]
                 state["open_page_visit"] = None
-            page_visits = [dict(visit) for visit in state.get("page_visits", [])]
 
             # Buffer the final study interval once; its raw event is committed alongside the handoff timing row.
             if state.get("study_completed_event_id") is None:
@@ -873,17 +866,16 @@ def complete_study():
                 state.setdefault("raw_events", []).append(completion_event)
                 state["study_completed_event_id"] = completion_event["event_id"]
 
-            if not record_prolific_handoff(
-                participant_id=participant_id,
-                room_id=room["archive_id"],
-                redirect_at=previous_redirect_at or redirect_at,
-                duration_seconds=duration_seconds,
-                page_visits=page_visits,
-                room_completed_at=room_completed_at,
-                raw_events=state.get("raw_events", []),
-                run_id=app.config["STUDY_RUN_ID"],
-            ):
+            try:
+                # Save this participant's final interval/completion events and any room updates as one raw-event batch.
+                persist_raw_events(
+                    db.engine,
+                    app.config["STUDY_RUN_ID"],
+                    [*state.get("raw_events", []), *room.get("raw_events", [])],
+                )
+            except (SQLAlchemyError, KeyError, TypeError, ValueError):
                 # Do not send the participant away when the final timestamp could not be saved; they can retry.
+                app.logger.exception("Could not save final raw study events.")
                 return "Could not save your completion time. Please try again.", 503
 
             session["prolific_redirect_at"] = previous_redirect_at or redirect_at
@@ -960,7 +952,7 @@ def submit_feedback():
             "additional_feedback": values["additional_feedback"],
             "timestamp": _utc_timestamp(),
         }
-        # Commit the whole server-owned participant/room snapshot before acknowledging this submission.
+        # Buffer validated feedback before atomically saving every participant and room event for the run.
         room.setdefault("feedback_submissions", {})[room_participant_id] = feedback_record
         # Buffer validated feedback with the stable participant identity for the same feedback transaction.
         feedback_event = _new_raw_event(
@@ -972,20 +964,21 @@ def submit_feedback():
             occurred_at=feedback_record["timestamp"],
         )
         room.setdefault("raw_events", []).append(feedback_event)
-        if not archive_completed_room(
-            room_code=room_code,
-            room_state=room,
-            study_sessions=study_sessions,
-            screening_submissions=screening_submissions,
-            feedback_room_participant_id=room_participant_id,
-            feedback_record=feedback_record,
-        ):
+        buffered_events = list(room["raw_events"])
+        for participant_id in room["participant_ids"].values():
+            participant_state = study_sessions.get(participant_id, {})
+            buffered_events.extend(participant_state.get("raw_events", []))
+        try:
+            # One transaction and stable event IDs make retries and the partner's later submit safe.
+            persist_raw_events(db.engine, app.config["STUDY_RUN_ID"], buffered_events)
+        except (SQLAlchemyError, KeyError, TypeError, ValueError):
             # Keep the response retryable if persistence failed; do not claim that feedback was saved.
             room["feedback_submissions"].pop(room_participant_id, None)
             room["raw_events"] = [
                 event for event in room.get("raw_events", [])
                 if event["event_id"] != feedback_event["event_id"]
             ]
+            app.logger.exception("Could not save buffered raw study events at feedback submission.")
             response = app.make_response(render_template(
                 "feedback.html",
                 submitted=False,

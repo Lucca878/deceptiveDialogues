@@ -1,6 +1,5 @@
 Flask==3.1.3
 gunicorn==23.0.0
-# Install the ORM, Flask integration, and migration CLI in the deployed virtual environment.
+# Raw run tables use Flask-SQLAlchemy for the shared database engine.
 Flask-SQLAlchemy==3.1.1
-Flask-Migrate==4.1.0
 SQLAlchemy==2.1.9
