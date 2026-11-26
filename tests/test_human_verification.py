@@ -86,7 +86,7 @@ class HumanVerificationTests(unittest.TestCase):
                 with self.subTest(path=rule.rule, method=method):
                     response = self.client.open(
                         rule.rule.replace("<code>", "ROOM01"), method=method,
-                        json={"participant_id": "test", "text": "Hello"},
+                        json={"room_participant_id": "test", "text": "Hello"},
                     )
                     self.assertEqual(response.status_code, 403)
                     self.assertEqual(set(response.get_json()), {"error", "verification_url"})
@@ -191,7 +191,7 @@ class HumanVerificationTests(unittest.TestCase):
                     travel_screening_complete=server.SCREENING_VERSION,
                     instructions_complete=True,
                 )
-            self.assertEqual(client.post("/api/rooms", json={"participant_id": participant_id}).status_code, 200)
+            self.assertEqual(client.post("/api/rooms", json={"room_participant_id": participant_id}).status_code, 200)
         self.assertEqual(first.get("/role-instructions").status_code, 200)
         self.assertEqual(first.post("/role-instructions").status_code, 302)
         self.assertEqual(first.get("/dialogue").location, "/role-instructions")
@@ -207,12 +207,12 @@ class HumanVerificationTests(unittest.TestCase):
         for role in ("interviewer", "interviewee"):
             client, participant_id = clients_by_role[role]
             self.assertEqual(client.post("/api/rooms/ROOM01/messages", json={
-                "participant_id": participant_id, "text": "Hello",
+                "room_participant_id": participant_id, "text": "Hello",
                 **({"question_type": "open-ended"} if role == "interviewer" else {}),
             }).status_code, 201)
             for poll_client, poll_id in ((first, "first"), (second, "second")):
                 self.assertEqual(poll_client.get("/api/rooms/ROOM01/messages", query_string={
-                    "participant_id": poll_id,
+                    "room_participant_id": poll_id,
                 }).status_code, 200)
         self.assertEqual(self.urlopen.call_count, 2)
 

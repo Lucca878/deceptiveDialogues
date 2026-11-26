@@ -86,18 +86,24 @@ def _utc_timestamp():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
-def _ensure_study_session(started=False):
-    """Create an opaque study ID and remember its first Start-click timestamp."""
-    study_session_id = session.get("study_session_id")
-    if not isinstance(study_session_id, str) or not study_session_id:
-        study_session_id = token_hex(16)
-        session["study_session_id"] = study_session_id
+def _ensure_participant_id(started=False):
+    """Create or migrate the stable participant ID and remember study start time."""
+    participant_id = session.get("participant_id")
+    if not isinstance(participant_id, str) or not participant_id:
+        # Preserve existing participants' IDs when their signed cookie still has the old key.
+        participant_id = session.pop("study_session_id", None)
+        if not isinstance(participant_id, str) or not participant_id:
+            participant_id = token_hex(16)
+        session["participant_id"] = participant_id
+    else:
+        # Remove the legacy alias after migration so one identity has one canonical cookie key.
+        session.pop("study_session_id", None)
 
     if started and not session.get("study_started_at"):
         session["study_started_at"] = _utc_timestamp()
 
     with rooms_lock:
-        state = study_sessions.setdefault(study_session_id, {
+        state = study_sessions.setdefault(participant_id, {
             "study_started_at": session.get("study_started_at"),
             "consent_accepted": session.get("consent_accepted") is True,
             "consent_accepted_at": session.get("consent_accepted_at"),
@@ -112,23 +118,23 @@ def _ensure_study_session(started=False):
         # A session cookie may outlive process memory; restore only its opaque ID and start timestamp.
         if state.get("study_started_at") is None:
             state["study_started_at"] = session.get("study_started_at")
-    return study_session_id
+    return participant_id
 
 
-def _update_study_session(study_session_id, **values):
+def _update_study_session(participant_id, **values):
     """Update server-side study metadata without copying private credentials into the archive."""
-    if not study_session_id:
+    if not participant_id:
         return
     with rooms_lock:
-        state = study_sessions.get(study_session_id)
+        state = study_sessions.get(participant_id)
         if state is not None:
             state.update(values)
 
 
-def _close_open_page_visit(study_session_id, exited_at):
+def _close_open_page_visit(participant_id, exited_at):
     """Close the current page interval using a server timestamp, if one is open."""
     with rooms_lock:
-        state = study_sessions.get(study_session_id)
+        state = study_sessions.get(participant_id)
         visit = state.get("open_page_visit") if state else None
         if not visit or visit.get("exited_at") is not None:
             return
@@ -139,10 +145,10 @@ def _close_open_page_visit(study_session_id, exited_at):
         state["open_page_visit"] = None
 
 
-def _record_page_visit(study_session_id, page_name, entered_at):
+def _record_page_visit(participant_id, page_name, entered_at):
     """Start a page visit and close the previous one at this server-observed transition."""
     with rooms_lock:
-        state = study_sessions.setdefault(study_session_id, {
+        state = study_sessions.setdefault(participant_id, {
             "study_started_at": session.get("study_started_at"),
             "page_visits": [],
             "open_page_visit": None,
@@ -241,8 +247,8 @@ def record_study_page_visit(response):
         or response.status_code >= 500
     ):
         return response
-    study_session_id = _ensure_study_session()
-    _record_page_visit(study_session_id, page_name, _utc_timestamp())
+    participant_id = _ensure_participant_id()
+    _record_page_visit(participant_id, page_name, _utc_timestamp())
     return response
 
 
@@ -292,8 +298,8 @@ def verify_human(): # Handles the human verification logic for GET and POST requ
                 ): # Check if verification succeeded and the action and hostname are valid.
                     session["human_verified"] = True # Mark the session as human-verified.
                     session["human_verification_config"] = _human_verification_fingerprint() # Store the human verification fingerprint in the session.
-                    _ensure_study_session()
-                    _update_study_session(session.get("study_session_id"), entry_verified=True)
+                    participant_id = _ensure_participant_id()
+                    _update_study_session(participant_id, entry_verified=True)
                     return redirect(url_for("landing")) # Redirect to the landing page after successful verification.
                 error = "Verification was not successful. Please complete a new check and try again." # Set error message for failed verification.
                 status_code = 400 # Set HTTP status code for failed verification.
@@ -357,36 +363,36 @@ def instructions_required(view):
     return wrapped
 
 
-def _get_participant_id(data):
+def _get_room_participant_id(data):
     if not isinstance(data, dict):
         return None
-    participant_id = data.get("participant_id")
-    if not isinstance(participant_id, str) or not participant_id or len(participant_id) > 64:
+    room_participant_id = data.get("room_participant_id")
+    if not isinstance(room_participant_id, str) or not room_participant_id or len(room_participant_id) > 64:
         return None
-    return participant_id
+    return room_participant_id
 
 
 def _message_for_client(message):
     return {
         key: message[key]
-        for key in ("id", "participant_id", "role", "text")
+        for key in ("id", "room_participant_id", "role", "text")
     } | {"is_claim": message.get("is_claim", False)}
 
 
-def _bound_room(code, claimed_id=None):
+def _bound_room(code, claimed_room_participant_id=None):
     """Called under rooms_lock. Browser IDs never grant membership."""
-    participant_id = session.get("room_participant_id")
+    room_participant_id = session.get("room_participant_id")
     room = rooms.get(code.upper())
     if (
         room is None
         or session.get("room_code") != code.upper()
-        or participant_id not in room["participants"]
+        or room_participant_id not in room["participants"]
         or not session.get("room_token")
-        or room["owners"].get(participant_id) != session["room_token"]
-        or (claimed_id is not None and claimed_id != participant_id)
+        or room["owners"].get(room_participant_id) != session["room_token"]
+        or (claimed_room_participant_id is not None and claimed_room_participant_id != room_participant_id)
     ):
         return None, None
-    return room, participant_id
+    return room, room_participant_id
 
 
 def _chat_ready(room):
@@ -400,11 +406,11 @@ def _dialogue_complete(room):
     """Called under rooms_lock; report completion without exposing the claim order."""
     if room["current_claim"] is not None:
         return False
-    interviewee_id = next(
-        (pid for pid, role in room["participants"].items() if role == "interviewee"),
+    interviewee_room_participant_id = next(
+        (room_participant_id for room_participant_id, role in room["participants"].items() if role == "interviewee"),
         None,
     )
-    submission = screening_submissions.get(room["screening_submission_ids"].get(interviewee_id))
+    submission = screening_submissions.get(room["screening_submission_ids"].get(interviewee_room_participant_id))
     order = submission.get("order") if submission else None
     return (
         isinstance(order, list)
@@ -429,14 +435,14 @@ def _advance_transition(room, now):
     return seconds_remaining, seconds_remaining == 0
 
 
-def _acknowledge_transition(room, participant_id):
+def _acknowledge_transition(room, room_participant_id):
     """Called under rooms_lock; retain transition state until both participants arrive."""
     if room.get("transition_advanced") is not True:
         return
     pending = room.get("transition_pending")
     if not isinstance(pending, set):
         return
-    pending.discard(participant_id)
+    pending.discard(room_participant_id)
     if not pending:
         room.pop("transition_end", None)
         room.pop("transition_advanced", None)
@@ -446,7 +452,7 @@ def _acknowledge_transition(room, participant_id):
 @app.get("/")
 def landing():
     # Create an opaque per-browser study reference so the landing visit can be timed without storing the cookie.
-    _ensure_study_session()
+    _ensure_participant_id()
     return render_template("landing.html")
 
 
@@ -456,8 +462,8 @@ def landing():
 @instructions_required
 def dialogue():
     with rooms_lock:
-        room, participant_id = _bound_room(session.get("room_code", ""))
-        if room is None or room["participants"][participant_id] is None:
+        room, room_participant_id = _bound_room(session.get("room_code", ""))
+        if room is None or room["participants"][room_participant_id] is None:
             return redirect(url_for("room"))
         if not _chat_ready(room):
             return redirect(url_for("role_instructions"))
@@ -467,12 +473,12 @@ def dialogue():
         # If there is no current claim, generate one based on the interviewee's next city and screening answers.
         if room["current_claim"] is None:
             # Identify the interviewee and retrieve their next city and corresponding screening answer.
-            interviewee_id = next(
-                (pid for pid, role in room["participants"].items() if role == "interviewee"),
+            interviewee_room_participant_id = next(
+                (room_participant_id for room_participant_id, role in room["participants"].items() if role == "interviewee"),
                 None,
             )
             # Retrieve the screening submission for the interviewee.
-            submission_id = room["screening_submission_ids"].get(interviewee_id)
+            submission_id = room["screening_submission_ids"].get(interviewee_room_participant_id)
             # Look up the submission in the global screening_submissions dictionary.
             submission = screening_submissions.get(submission_id)
             # Extract the order of cities from the submission, if available.
@@ -495,7 +501,7 @@ def dialogue():
             )
             # If any of the required information is missing or invalid, return an error.
             if (
-                interviewee_id is None
+                interviewee_room_participant_id is None
                 or answer is None
                 or answer.get("visited") not in ("yes", "no")
                 or city_name is None
@@ -506,7 +512,7 @@ def dialogue():
             # Construct the claim message based on the interviewee's answer and the city name.
             claim_message = {
                 "id": len(room["messages"]) + 1,
-                "participant_id": interviewee_id,
+                "room_participant_id": interviewee_room_participant_id,
                 "role": "interviewee",
                 "text": f"I have visited {city_name} in the past three years.",
                 "is_claim": True,
@@ -535,9 +541,9 @@ def dialogue():
             # Discard any typing pings sent before the opening claim was created.
             room["typing"].clear()
             # The current claim now reflects the interviewee's latest response.
-        _acknowledge_transition(room, participant_id)
+        _acknowledge_transition(room, room_participant_id)
         # Pass this participant's server-derived role into the template so interviewer-only judgement controls are never sent to the interviewee.
-        return render_template("dialogue.html", role=room["participants"][participant_id])
+        return render_template("dialogue.html", role=room["participants"][room_participant_id])
 
 
 @app.get("/debriefing")
@@ -546,16 +552,16 @@ def dialogue():
 @instructions_required
 def debriefing():
     with rooms_lock:
-        room, participant_id = _bound_room(session.get("room_code", ""))
-        if room is None or room["participants"][participant_id] is None:
+        room, room_participant_id = _bound_room(session.get("room_code", ""))
+        if room is None or room["participants"][room_participant_id] is None:
             return redirect(url_for("room"))
         if not _chat_ready(room):
             return redirect(url_for("role_instructions"))
         if not _dialogue_complete(room):
             return redirect(url_for("dialogue"))
-        if participant_id not in room.get("feedback_submissions", {}):
+        if room_participant_id not in room.get("feedback_submissions", {}):
             return redirect(url_for("feedback"))
-        _acknowledge_transition(room, participant_id)
+        _acknowledge_transition(room, room_participant_id)
         response = app.make_response(render_template("debriefing.html"))
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -567,16 +573,16 @@ def debriefing():
 @instructions_required
 def feedback():
     with rooms_lock:
-        room, participant_id = _bound_room(session.get("room_code", ""))
-        if room is None or room["participants"][participant_id] is None:
+        room, room_participant_id = _bound_room(session.get("room_code", ""))
+        if room is None or room["participants"][room_participant_id] is None:
             return redirect(url_for("room"))
         if not _chat_ready(room):
             return redirect(url_for("role_instructions"))
         if not _dialogue_complete(room):
             return redirect(url_for("dialogue"))
-        _acknowledge_transition(room, participant_id)
+        _acknowledge_transition(room, room_participant_id)
         # Keep the completion page final for this participant after feedback is saved.
-        submitted = participant_id in room.get("feedback_submissions", {})
+        submitted = room_participant_id in room.get("feedback_submissions", {})
         response = app.make_response(render_template("feedback.html", submitted=submitted))
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -588,14 +594,14 @@ def feedback():
 def study_ended():
     # Recheck the participant's server-owned room and completion state before showing the final destination.
     with rooms_lock:
-        room, participant_id = _bound_room(session.get("room_code", ""))
-        if room is None or room["participants"][participant_id] is None:
+        room, room_participant_id = _bound_room(session.get("room_code", ""))
+        if room is None or room["participants"][room_participant_id] is None:
             return redirect(url_for("room"))
         if not _chat_ready(room):
             return redirect(url_for("role_instructions"))
         if not _dialogue_complete(room):
             return redirect(url_for("dialogue"))
-        if participant_id not in room.get("feedback_submissions", {}):
+        if room_participant_id not in room.get("feedback_submissions", {}):
             return redirect(url_for("feedback"))
         # Disable caching so a stale final page does not linger after navigation.
         response = app.make_response(render_template(
@@ -613,20 +619,20 @@ def study_ended():
 def complete_study():
     # Revalidate completion on the server before recording the final redirect timestamp.
     with rooms_lock:
-        room, participant_id = _bound_room(session.get("room_code", ""))
-        if room is None or room["participants"][participant_id] is None:
+        room, room_participant_id = _bound_room(session.get("room_code", ""))
+        if room is None or room["participants"][room_participant_id] is None:
             return redirect(url_for("room"))
         if not _chat_ready(room):
             return redirect(url_for("role_instructions"))
         if not _dialogue_complete(room):
             return redirect(url_for("dialogue"))
-        if participant_id not in room.get("feedback_submissions", {}):
+        if room_participant_id not in room.get("feedback_submissions", {}):
             return redirect(url_for("feedback"))
 
         # Record when this app initiates the external handoff; Prolific's successful receipt is not observable here.
         redirect_at = session.get("prolific_redirect_at") or _utc_timestamp()
-        study_session_id = session.get("study_session_id", "")
-        state = study_sessions.get(study_session_id)
+        participant_id = session.get("participant_id", "")
+        state = study_sessions.get(participant_id)
         if state is not None:
             started_at = state.get("study_started_at")
             duration_seconds = None
@@ -636,9 +642,9 @@ def complete_study():
                     (datetime.fromisoformat(redirect_at) - datetime.fromisoformat(started_at)).total_seconds(),
                 )
             participants_completed_at = room.setdefault("participants_completed_at", {})
-            previous_redirect_at = participants_completed_at.get(participant_id)
+            previous_redirect_at = participants_completed_at.get(room_participant_id)
             if previous_redirect_at is None:
-                participants_completed_at[participant_id] = redirect_at
+                participants_completed_at[room_participant_id] = redirect_at
             room_completed_at = room.get("completed_at")
             if room_completed_at is None and set(participants_completed_at) >= set(room["participants"]):
                 room_completed_at = redirect_at
@@ -653,7 +659,7 @@ def complete_study():
                 )
 
             if not record_prolific_handoff(
-                study_session_id=study_session_id,
+                participant_id=participant_id,
                 room_id=room["archive_id"],
                 redirect_at=previous_redirect_at or redirect_at,
                 duration_seconds=duration_seconds,
@@ -673,7 +679,7 @@ def complete_study():
 
     # The final study page has remained open until this same-origin redirect request.
     final_redirect_at = session["prolific_redirect_at"]
-    _close_open_page_visit(study_session_id, final_redirect_at)
+    _close_open_page_visit(participant_id, final_redirect_at)
     # Redirect using only the server-configured destination, never a browser-provided URL.
     return redirect(app.config["PROLIFIC_COMPLETION_URL"])
 
@@ -685,7 +691,7 @@ def complete_study():
 def submit_feedback():
     # Bind this submission to the room participant in the signed session, not a posted participant ID.
     room_code = session.get("room_code", "")
-    participant_id = session.get("room_participant_id", "")
+    room_participant_id = session.get("room_participant_id", "")
     errors = {}
     values = {
         "task_skill": request.form.get("task_skill", ""),
@@ -696,15 +702,15 @@ def submit_feedback():
     }
 
     with rooms_lock:
-        room, participant_id = _bound_room(room_code, participant_id)
-        if room is None or room["participants"][participant_id] is None:
+        room, room_participant_id = _bound_room(room_code, room_participant_id)
+        if room is None or room["participants"][room_participant_id] is None:
             return redirect(url_for("room"))
         if not _chat_ready(room):
             return redirect(url_for("role_instructions"))
         if not _dialogue_complete(room):
             return redirect(url_for("dialogue"))
         # Preserve the first saved form response; refreshes or repeated POSTs cannot overwrite it.
-        if participant_id in room.get("feedback_submissions", {}):
+        if room_participant_id in room.get("feedback_submissions", {}):
             return redirect(url_for("debriefing"))
 
         # Each required rating must be exactly one value from the seven-point scale.
@@ -738,17 +744,17 @@ def submit_feedback():
             "timestamp": _utc_timestamp(),
         }
         # Commit the whole server-owned participant/room snapshot before acknowledging this submission.
-        room.setdefault("feedback_submissions", {})[participant_id] = feedback_record
+        room.setdefault("feedback_submissions", {})[room_participant_id] = feedback_record
         if not archive_completed_room(
             room_code=room_code,
             room_state=room,
             study_sessions=study_sessions,
             screening_submissions=screening_submissions,
-            feedback_participant_id=participant_id,
+            feedback_room_participant_id=room_participant_id,
             feedback_record=feedback_record,
         ):
             # Keep the response retryable if persistence failed; do not claim that feedback was saved.
-            room["feedback_submissions"].pop(participant_id, None)
+            room["feedback_submissions"].pop(room_participant_id, None)
             response = app.make_response(render_template(
                 "feedback.html",
                 submitted=False,
@@ -773,7 +779,7 @@ def room():
 @app.get("/consent")
 def consent():
     # Ensure direct consent links still receive a pseudonymous study ID for later page timing.
-    _ensure_study_session()
+    _ensure_participant_id()
     if session.get("consent_accepted") is True:
         if _screening_complete() and session.get("travel_screened_out") is not True:
             return redirect(url_for("instructions"))
@@ -784,8 +790,8 @@ def consent():
 @app.get("/start")
 def start_study():
     # Preserve the first server timestamp for the participant's Start-the-study click.
-    study_session_id = _ensure_study_session(started=True)
-    _close_open_page_visit(study_session_id, session["study_started_at"])
+    participant_id = _ensure_participant_id(started=True)
+    _close_open_page_visit(participant_id, session["study_started_at"])
     return redirect(url_for("consent")) # redirect to consent page
 
 
@@ -799,11 +805,11 @@ def consent_decision():
     session.pop("other_cities_complete", None)
     if decision == "accept":
         # Ensure a direct consent POST still has a server-timed study start.
-        _ensure_study_session(started=True)
+        participant_id = _ensure_participant_id(started=True)
         session["consent_accepted"] = True
         session.setdefault("consent_accepted_at", _utc_timestamp())
         _update_study_session(
-            session.get("study_session_id"),
+            participant_id,
             consent_accepted=True,
             consent_accepted_at=session["consent_accepted_at"],
         )
@@ -813,7 +819,7 @@ def consent_decision():
     session.pop("consent_accepted", None)
     session.pop("consent_accepted_at", None)
     _update_study_session(
-        session.get("study_session_id"),
+        session.get("participant_id"),
         consent_accepted=False,
         consent_accepted_at=None,
     )
@@ -838,7 +844,7 @@ def begin_travel_screening():
     if _screening_complete():
         return redirect(url_for("instructions"))
     session["travel_intro_seen"] = True
-    _update_study_session(session.get("study_session_id"), travel_intro_seen=True)
+    _update_study_session(session.get("participant_id"), travel_intro_seen=True)
     return redirect(url_for("travel_cities"))
 
 
@@ -899,13 +905,13 @@ def travel_cities():
                     }
                     # Re-screening replaces only this owner's room reference;
                     # no participant's retained record is deleted or overwritten.
-                    bound_room, participant_id = _bound_room(session.get("room_code", ""))
+                    bound_room, room_participant_id = _bound_room(session.get("room_code", ""))
                     if bound_room is not None:
-                        bound_room["screening_submission_ids"][participant_id] = submission_id
+                        bound_room["screening_submission_ids"][room_participant_id] = submission_id
                     session["screening_submission_id"] = submission_id
                 session["travel_screening_complete"] = SCREENING_VERSION
                 _update_study_session(
-                    session.get("study_session_id"),
+                    session.get("participant_id"),
                     screening_complete_version=SCREENING_VERSION,
                     travel_screened_out=False,
                 )
@@ -913,7 +919,7 @@ def travel_cities():
             session.pop("travel_screening_complete", None)
             session["travel_screened_out"] = True
             _update_study_session(
-                session.get("study_session_id"),
+                session.get("participant_id"),
                 screening_complete_version=None,
                 travel_screened_out=True,
             )
@@ -936,7 +942,7 @@ def instructions():
 @screening_required
 def continue_to_matching():
     session["instructions_complete"] = True
-    _update_study_session(session.get("study_session_id"), instructions_complete=True)
+    _update_study_session(session.get("participant_id"), instructions_complete=True)
     return redirect(url_for("room"))
 
 
@@ -946,17 +952,17 @@ def continue_to_matching():
 @instructions_required
 def role_instructions():
     with rooms_lock:
-        claimed_id = request.values.get("participant_id")
+        claimed_room_participant_id = request.values.get("room_participant_id")
         data = request.get_json(silent=True)
-        if isinstance(data, dict) and "participant_id" in data:
-            claimed_id = data["participant_id"]
-        room, participant_id = _bound_room(session.get("room_code", ""), claimed_id)
-        if claimed_id is not None and claimed_id != session.get("room_participant_id"):
+        if isinstance(data, dict) and "room_participant_id" in data:
+            claimed_room_participant_id = data["room_participant_id"]
+        room, room_participant_id = _bound_room(session.get("room_code", ""), claimed_room_participant_id)
+        if claimed_room_participant_id is not None and claimed_room_participant_id != session.get("room_participant_id"):
             return "This participant is not in the room.", 403
-        if room is None or room["participants"][participant_id] is None:
+        if room is None or room["participants"][room_participant_id] is None:
             return redirect(url_for("room"))
         if request.method == "POST":
-            room["ready"].add(participant_id)
+            room["ready"].add(room_participant_id)
             return redirect(url_for("role_instructions"))
         if _chat_ready(room):
             # Start the room timeline when both participants are ready to enter the shared chat.
@@ -964,8 +970,8 @@ def role_instructions():
             return redirect(url_for("dialogue"))
         response = app.make_response(render_template(
             "role_instructions.html",
-            role=room["participants"][participant_id],
-            ready=participant_id in room["ready"],
+            role=room["participants"][room_participant_id],
+            ready=room_participant_id in room["ready"],
             code=session["room_code"],
         ))
         response.headers["Cache-Control"] = "no-store"
@@ -986,24 +992,24 @@ def screened_out_cities():
 @instructions_required
 def match_room(): # Handles the API request to match a participant to a room
     data = request.get_json(silent=True) or {}
-    participant_id = _get_participant_id(data)
-    if participant_id is None:
-        return jsonify(error="A participant ID is required."), 400
+    room_participant_id = _get_room_participant_id(data)
+    if room_participant_id is None:
+        return jsonify(error="A room participant ID is required."), 400
 
     with rooms_lock:
         # Returning clients keep their place, even when every room is occupied. This ensures that participants who have already been assigned a room do not lose their spot.
         for code, room in rooms.items():
-            if participant_id in room["participants"]:
-                bound_room, _ = _bound_room(code, participant_id)
+            if room_participant_id in room["participants"]:
+                bound_room, _ = _bound_room(code, room_participant_id)
                 if bound_room is None:
-                    return jsonify(error="This participant ID is already in use."), 403
-                role = room["participants"][participant_id]
+                    return jsonify(error="This room participant ID is already in use."), 403
+                role = room["participants"][room_participant_id]
                 if role is None:
                     return jsonify(code=code, status="waiting")
                 return jsonify(code=code, status="paired", role=role)
 
-        if session.get("room_participant_id") not in (None, participant_id):
-            return jsonify(error="This session is bound to another participant."), 403
+        if session.get("room_participant_id") not in (None, room_participant_id):
+            return jsonify(error="This session is bound to another room participant."), 403
 
         # Fill a waiting room before opening the next unused code.
         code = next((code for code in ROOM_CODES if code in rooms and len(rooms[code]["participants"]) == 1), None)
@@ -1013,45 +1019,47 @@ def match_room(): # Handles the API request to match a participant to a room
                 return jsonify(error="All rooms are currently occupied."), 409
             token = token_hex(32)
             # Add a room field for the next allowed speaker; initialize it to None until the claim exists.
-            rooms[code] = {"archive_id": token_hex(16), "created_at": _utc_timestamp(), "participants": {participant_id: None}, "messages": [], "dialogues": [], "typing": {}, "ready": set(), "owners": {participant_id: token}, "study_session_ids": {participant_id: session.get("study_session_id", "")}, "current_claim": None, "current_claim_index": 0, "next_speaker": None}
-            rooms[code]["screening_submission_ids"] = {participant_id: session["screening_submission_id"]} # Store the screening submission ID for the participant in the room; for creating a new room.
-            session.update(room_code=code, room_participant_id=participant_id, room_token=token)
-            study_state = study_sessions.get(session.get("study_session_id", ""))
+            participant_id = session.get("participant_id", "")
+            rooms[code] = {"archive_id": token_hex(16), "created_at": _utc_timestamp(), "participants": {room_participant_id: None}, "messages": [], "dialogues": [], "typing": {}, "ready": set(), "owners": {room_participant_id: token}, "participant_ids": {room_participant_id: participant_id}, "current_claim": None, "current_claim_index": 0, "next_speaker": None}
+            rooms[code]["screening_submission_ids"] = {room_participant_id: session["screening_submission_id"]} # Store the screening submission ID for this room participant.
+            session.update(room_code=code, room_participant_id=room_participant_id, room_token=token)
+            study_state = study_sessions.get(participant_id)
             if study_state is not None:
-                study_state.update(room_code=code, participant_id=participant_id)
+                study_state.update(room_code=code, room_participant_id=room_participant_id)
                 if study_state.get("open_page_visit"):
                     study_state["open_page_visit"]["room_id"] = rooms[code]["archive_id"]
             return jsonify(code=code, status="waiting")
 
         token = token_hex(32)
-        rooms[code]["owners"][participant_id] = token
-        rooms[code].setdefault("study_session_ids", {})[participant_id] = session.get("study_session_id", "")
-        rooms[code]["screening_submission_ids"][participant_id] = session["screening_submission_id"] # Store the screening submission ID for the participant in the room; if room exists, update it with the new participant's ID.
-        session.update(room_code=code, room_participant_id=participant_id, room_token=token)
+        participant_id = session.get("participant_id", "")
+        rooms[code]["owners"][room_participant_id] = token
+        rooms[code].setdefault("participant_ids", {})[room_participant_id] = participant_id
+        rooms[code]["screening_submission_ids"][room_participant_id] = session["screening_submission_id"] # Store the screening submission ID for this room participant.
+        session.update(room_code=code, room_participant_id=room_participant_id, room_token=token)
         participants = rooms[code]["participants"] # Get the dictionary of participants for the current room
-        participants[participant_id] = None # Initialize the participant's role to None until assigned
+        participants[room_participant_id] = None # Initialize the room membership role until assigned.
         roles = ["interviewer", "interviewee"] # List of possible roles for participants in the room
         if choice((True, False)):
             roles.reverse()
         participants.update(zip(participants, roles)) # Assign roles to participants in the room, pairing them with the available roles
         rooms[code]["paired_at"] = _utc_timestamp()
-        for paired_participant_id in participants:
+        for paired_room_participant_id in participants:
             study_state = study_sessions.get(
-                rooms[code]["study_session_ids"].get(paired_participant_id, ""),
+                rooms[code]["participant_ids"].get(paired_room_participant_id, ""),
             )
             if study_state is not None:
-                study_state.update(room_code=code, participant_id=paired_participant_id)
+                study_state.update(room_code=code, room_participant_id=paired_room_participant_id)
                 if study_state.get("open_page_visit"):
                     study_state["open_page_visit"]["room_id"] = rooms[code]["archive_id"]
         # Find the participant who was assigned the interviewer role.
-        interviewer_id = next(
-            pid for pid, role in participants.items() if role == "interviewer"
+        interviewer_room_participant_id = next(
+            room_participant_id for room_participant_id, role in participants.items() if role == "interviewer"
         )
         # Independently choose feedback or control with equal probability.
         assigned_condition = choice(("feedback", "control"))
         # Keep the condition in server-side room state, keyed by the interviewer ID.
-        rooms[code]["conditions"] = {interviewer_id: assigned_condition}
-        return jsonify(code=code, status="paired", role=participants[participant_id])
+        rooms[code]["conditions"] = {interviewer_room_participant_id: assigned_condition}
+        return jsonify(code=code, status="paired", role=participants[room_participant_id])
 
 
 @app.get("/api/rooms/<code>") # Retrieves the status of a specific room for a participant
@@ -1059,17 +1067,17 @@ def match_room(): # Handles the API request to match a participant to a room
 @screening_required
 @instructions_required
 def room_status(code):
-    claimed_id = request.args.get("participant_id")
+    claimed_room_participant_id = request.args.get("room_participant_id")
     with rooms_lock: # Ensures thread-safe access to the rooms dictionary
-        room, participant_id = _bound_room(code, claimed_id)
+        room, room_participant_id = _bound_room(code, claimed_room_participant_id)
         if room is None:
             return jsonify(error="This session is not a participant in the room."), 403
 
         participants = room["participants"]
-        if participant_id not in participants:
+        if room_participant_id not in participants:
             return jsonify(error="This participant is not in the room."), 403
 
-        role = participants[participant_id]
+        role = participants[room_participant_id]
         chat_ready = _chat_ready(room)
     if role is None: # If the participant has not been assigned a role yet, they are still waiting
         return jsonify(code=code.upper(), status="waiting", chat_ready=False)
@@ -1082,10 +1090,10 @@ def room_status(code):
 @instructions_required
 def send_room_message(code): # Handles sending a message to a specific room by a participant
     data = request.get_json(silent=True) or {} # Get the JSON data from the request body, or use an empty dictionary if none is provided
-    participant_id = _get_participant_id(data) # Extract the participant ID from the request data
+    room_participant_id = _get_room_participant_id(data) # Extract the room membership ID from the request data.
     text = data.get("text") if isinstance(data, dict) else None
-    if participant_id is None:
-        return jsonify(error="A participant ID is required."), 400 # Return an error if no participant ID is provided
+    if room_participant_id is None:
+        return jsonify(error="A room participant ID is required."), 400
     if not isinstance(text, str) or not text.strip():
         return jsonify(error="A non-empty message is required."), 400 # Return an error if the message text is empty or not a string
     text = text.strip() # Trim leading and trailing whitespace from the message text
@@ -1093,13 +1101,13 @@ def send_room_message(code): # Handles sending a message to a specific room by a
         return jsonify(error="Messages must be 2000 characters or fewer."), 400 # Return an error if the message exceeds the character limit    
 
     with rooms_lock:
-        room, participant_id = _bound_room(code, participant_id)
+        room, room_participant_id = _bound_room(code, room_participant_id)
         if room is None or not _chat_ready(room):
             return jsonify(error="Both participants must be ready in your assigned room."), 403
         # Ensure that the opening claim has been made before allowing messages to be sent
         if room["current_claim"] is None:
             return jsonify(error="The opening claim must be available before messages can be sent."), 403
-        role = room["participants"][participant_id]
+        role = room["participants"][room_participant_id]
         # Before accepting an interviewer message, reject it if this claim already has 10 questions
         if role == "interviewer" and room["current_claim"]["interviewer_question_count"] >= 10:
             return jsonify(error="This claim has already received 10 questions from the interviewer."), 403
@@ -1115,7 +1123,7 @@ def send_room_message(code): # Handles sending a message to a specific room by a
                 return jsonify(error="Interviewee messages cannot have a question type."), 400
         message = {
             "id": len(room["messages"]) + 1,
-            "participant_id": participant_id,
+            "room_participant_id": room_participant_id,
             "role": role,
             "text": text,
             "timestamp": _utc_timestamp(),
@@ -1161,22 +1169,22 @@ def send_room_message(code): # Handles sending a message to a specific room by a
 def set_question_type(code):
     # Accept a category only for the interviewer’s pending message in the active dialogue.
     data = request.get_json(silent=True) or {}
-    participant_id = _get_participant_id(data)
+    room_participant_id = _get_room_participant_id(data)
     question_type = data.get("question_type") if isinstance(data, dict) else None
     allowed_question_types = ["open-ended", "closed-ended", "follow-up", "clarification", "probing"]
-    if participant_id is None:
-        return jsonify(error="A participant ID is required."), 400
+    if room_participant_id is None:
+        return jsonify(error="A room participant ID is required."), 400
     if question_type not in allowed_question_types:
         return jsonify(error="A valid question type is required."), 400
 
     with rooms_lock:
         # Bind the request to its assigned room and reject stale or unrelated participants.
-        room, participant_id = _bound_room(code, participant_id)
+        room, room_participant_id = _bound_room(code, room_participant_id)
         if room is None or not _chat_ready(room):
             return jsonify(error="Both participants must be ready in your assigned room."), 403
         if room["current_claim"] is None:
             return jsonify(error="There is no active question to categorize."), 403
-        if room["participants"].get(participant_id) != "interviewer":
+        if room["participants"].get(room_participant_id) != "interviewer":
             return jsonify(error="Only the interviewer can categorize a question."), 403
 
         # Require the one pending message rather than allowing a category to be changed later.
@@ -1187,7 +1195,7 @@ def set_question_type(code):
             (item for item in room["messages"] if item["id"] == pending_message_id),
             None,
         )
-        if message is None or message["participant_id"] != participant_id:
+        if message is None or message["room_participant_id"] != room_participant_id:
             return jsonify(error="The pending question could not be found."), 409
 
         # Save private metadata, clear the gate, and grant the interviewee the next turn atomically.
@@ -1205,17 +1213,17 @@ def set_question_type(code):
 @instructions_required
 def submit_judgement(code):
     data = request.get_json(silent=True) or {}
-    participant_id = _get_participant_id(data)
-    if participant_id is None:
-        return jsonify(error="A participant ID is required."), 400
+    room_participant_id = _get_room_participant_id(data)
+    if room_participant_id is None:
+        return jsonify(error="A room participant ID is required."), 400
 
     with rooms_lock:
-        room, participant_id = _bound_room(code, participant_id)
+        room, room_participant_id = _bound_room(code, room_participant_id)
         if room is None or not _chat_ready(room):
             return jsonify(error="Both participants must be ready in your assigned room."), 403
         if room["current_claim"] is None:
             return jsonify(error="The opening claim must be available before submitting a judgement."), 403
-        if room["participants"][participant_id] != "interviewer":
+        if room["participants"][room_participant_id] != "interviewer":
             return jsonify(error="Only the interviewer can submit a judgement."), 403
         if room["current_claim"].get("question_turns_ended") is not True:
             return jsonify(error="All ten questions must be asked before submitting a judgement."), 403
@@ -1239,10 +1247,10 @@ def submit_judgement(code):
         room["current_claim"]["judgement_submitted_at"] = judgement_submitted_at
         # only when this room's assigned interviewer is in the feedback condition; never expose it to control.
         # Determine if the current interviewer is in the feedback condition
-        interviewer_id = next(
-            pid for pid, role in room["participants"].items() if role == "interviewer"
+        interviewer_room_participant_id = next(
+            room_participant_id for room_participant_id, role in room["participants"].items() if role == "interviewer"
         )
-        condition = room.get("conditions", {}).get(interviewer_id)
+        condition = room.get("conditions", {}).get(interviewer_room_participant_id)
         if condition == "feedback":
             return jsonify(status="ok", correct=correct), 201
         else:
@@ -1258,17 +1266,17 @@ def submit_judgement(code):
 @instructions_required
 def continue_claim(code):
     data = request.get_json(silent=True) or {}
-    participant_id = _get_participant_id(data)
-    if participant_id is None:
-        return jsonify(error="A participant ID is required."), 400
+    room_participant_id = _get_room_participant_id(data)
+    if room_participant_id is None:
+        return jsonify(error="A room participant ID is required."), 400
 
     with rooms_lock:
-        room, participant_id = _bound_room(code, participant_id)
+        room, room_participant_id = _bound_room(code, room_participant_id)
         if room is None or not _chat_ready(room):
             return jsonify(error="Both participants must be ready in your assigned room."), 403
         if room["current_claim"] is None:
             return jsonify(error="The opening claim must be available before continuing."), 403
-        if room["participants"][participant_id] != "interviewer":
+        if room["participants"][room_participant_id] != "interviewer":
             return jsonify(error="Only the interviewer can continue to the next claim."), 403
         if room["current_claim"].get("judgement") is None:
             return jsonify(error="A judgement must be submitted before continuing."), 403
@@ -1323,21 +1331,21 @@ TYPING_WINDOW_SECONDS = 3.0
 @instructions_required
 def set_typing(code):
     data = request.get_json(silent=True) or {} # Parse the JSON body of the request, or use an empty dictionary if parsing fails
-    participant_id = _get_participant_id(data) # Extract the participant ID from the request data
-    if participant_id is None:
-        return jsonify(error="A participant ID is required."), 400 # Return an error if the participant ID is missing
+    room_participant_id = _get_room_participant_id(data)
+    if room_participant_id is None:
+        return jsonify(error="A room participant ID is required."), 400
 
     with rooms_lock:
-        room, participant_id = _bound_room(code, participant_id)
+        room, room_participant_id = _bound_room(code, room_participant_id)
         if room is None or not _chat_ready(room):
             return jsonify(error="Both participants must be ready in your assigned room."), 403
         if room["current_claim"] is None:
             return jsonify(error="The opening claim must be available before typing."), 403
         # Reject typing pings unless this participant's role is room["next_speaker"].
-        if room["next_speaker"] != room["participants"][participant_id]:
+        if room["next_speaker"] != room["participants"][room_participant_id]:
             return jsonify(error="It's not your turn to type."), 403
 
-        room["typing"][participant_id] = monotonic() # Update the timestamp of the participant's last typing activity
+        room["typing"][room_participant_id] = monotonic() # Update this room participant's typing time.
     return jsonify(status="ok") # Return a success status after setting the typing indicator
 
 
@@ -1346,14 +1354,14 @@ def set_typing(code):
 @screening_required
 @instructions_required
 def get_room_messages(code):
-    participant_id = request.args.get("participant_id", "")
+    room_participant_id = request.args.get("room_participant_id", "")
     try:
         after_id = max(0, int(request.args.get("after_id", "0")))
     except ValueError:
         return jsonify(error="after_id must be a non-negative integer."), 400
 
     with rooms_lock:
-        room, participant_id = _bound_room(code, participant_id)
+        room, room_participant_id = _bound_room(code, room_participant_id)
         if room is None or not _chat_ready(room):
             return jsonify(error="Both participants must be ready in your assigned room."), 403
 
@@ -1370,7 +1378,7 @@ def get_room_messages(code):
         now = monotonic()
         seconds_remaining, transition_expired = _advance_transition(room, now)
         partner_typing = any(
-            partner_id != participant_id and now - last < TYPING_WINDOW_SECONDS
+            partner_id != room_participant_id and now - last < TYPING_WINDOW_SECONDS
             for partner_id, last in room["typing"].items()
         )
         current_claim = room["current_claim"]
@@ -1390,17 +1398,17 @@ def get_room_messages(code):
             question_number = min(question_count + 1, 10)
         # A participant keeps receiving the completion signal until its page request acknowledges the transition.
         pending = room.get("transition_pending", set())
-        transition_complete = transition_expired and participant_id in pending
-        if participant_id not in pending:
+        transition_complete = transition_expired and room_participant_id in pending
+        if room_participant_id not in pending:
             seconds_remaining = None
         # Report only the completion boolean, never the private shuffled claim order.
         dialogue_complete = _dialogue_complete(room)
         dialogue_number = current_claim["dialogue_id"] if current_claim else None
         # This response is bound to the requester; it exposes no city answer or claim truth.
-        can_send = room["next_speaker"] == room["participants"][participant_id]
+        can_send = room["next_speaker"] == room["participants"][room_participant_id]
         # Only the interviewer needs to know why the turn is paused; the category itself stays private.
         interviewer_question_type_pending = (
-            question_type_pending and room["participants"][participant_id] == "interviewer"
+            question_type_pending and room["participants"][room_participant_id] == "interviewer"
         )
 
     response_data = dict(

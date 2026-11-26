@@ -51,10 +51,11 @@ reducedMotion.addEventListener("change", updateMatchingDisplay);
 sessionStorage.removeItem("chat-role"); // Clears the stored chat role
 sessionStorage.removeItem("chat-room-code"); // Clears the stored chat room code
 sessionStorage.removeItem("pending-room-code"); // Clears the stored pending room code
-
-const storedParticipantId = sessionStorage.getItem("participant-id"); // Retrieves the stored participant ID, if any
-const participantId = storedParticipantId ?? crypto.randomUUID(); // Generates a new participant ID if none is stored
-if (!storedParticipantId) sessionStorage.setItem("participant-id", participantId); // Stores the new participant ID if it was generated 
+const storedRoomParticipantId = sessionStorage.getItem("room-participant-id")
+  ?? sessionStorage.getItem("participant-id"); // Reuse the old browser ID during the key rename so server session bindings still match.
+const roomParticipantId = storedRoomParticipantId ?? crypto.randomUUID(); // Generates a new participant ID if none is stored
+sessionStorage.setItem("room-participant-id", roomParticipantId); // Store the canonical room membership ID for matching retries.
+sessionStorage.removeItem("participant-id"); // Remove the old ambiguous key after safely migrating its value.
 
 let pollingTimer: number | undefined; // Stores the ID of the polling timer for checking room status
 
@@ -85,7 +86,7 @@ function enterDialogue(code: string, role: Role): void {
 
 async function checkRoomStatus(code: string): Promise<void> { // Checks the status of a specific room for the participant
   try {
-    const url = `/api/rooms/${encodeURIComponent(code)}?participant_id=${encodeURIComponent(participantId)}`;
+    const url = `/api/rooms/${encodeURIComponent(code)}?room_participant_id=${encodeURIComponent(roomParticipantId)}`;
     const response = await fetch(url);
     const data = await readResponse(response);
 
@@ -118,7 +119,7 @@ async function findPartner(): Promise<void> { // Initiates the process of findin
     const response = await fetch("/api/rooms", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ participant_id: participantId }),
+      body: JSON.stringify({ room_participant_id: roomParticipantId }),
     }); // Sends a request to create or join a room for the participant
     const data = await readResponse(response); // Reads and parses the JSON response from the server
     if (!data.code) throw new Error("The server did not return a room assignment."); // Throws an error if the server response does not include a room code

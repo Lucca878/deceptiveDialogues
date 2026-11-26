@@ -98,13 +98,13 @@ class TravelScreeningTests(unittest.TestCase):
         self.assert_redirect(self.client.post("/role-instructions"), destination)
         for method, path in (
             ("POST", "/api/rooms"),
-            ("GET", "/api/rooms/ROOM01?participant_id=test"),
+            ("GET", "/api/rooms/ROOM01?room_participant_id=test"),
             ("POST", "/api/rooms/ROOM01/messages"),
-            ("GET", "/api/rooms/ROOM01/messages?participant_id=test"),
+            ("GET", "/api/rooms/ROOM01/messages?room_participant_id=test"),
             ("POST", "/api/rooms/ROOM01/typing"),
         ):
             with self.subTest(method=method, path=path):
-                response = self.client.open(path, method=method, json={"participant_id": "test", "text": "Hello"})
+                response = self.client.open(path, method=method, json={"room_participant_id": "test", "text": "Hello"})
                 self.assertEqual(response.status_code, 403)
                 self.assertIn("error", response.get_json())
         self.assertEqual(server.rooms, {})
@@ -134,11 +134,23 @@ class TravelScreeningTests(unittest.TestCase):
         with self.client.session_transaction() as browser_session:
             self.assertEqual(
                 set(browser_session),
-                {"consent_accepted", "consent_accepted_at", "study_session_id", "study_started_at", "travel_intro_seen"},
+                {"consent_accepted", "consent_accepted_at", "participant_id", "study_started_at", "travel_intro_seen"},
             )
-            self.assertEqual(len(browser_session["study_session_id"]), 32)
+            self.assertEqual(len(browser_session["participant_id"]), 32)
             self.assertIsNotNone(datetime.fromisoformat(browser_session["study_started_at"]))
             self.assertIsNotNone(datetime.fromisoformat(browser_session["consent_accepted_at"]))
+
+    def test_legacy_study_session_cookie_key_migrates_without_changing_identity(self):
+        legacy_participant_id = "a" * 32
+        with self.client.session_transaction() as browser_session:
+            browser_session["study_session_id"] = legacy_participant_id
+
+        self.assertEqual(self.client.get("/").status_code, 200)
+
+        with self.client.session_transaction() as browser_session:
+            self.assertEqual(browser_session["participant_id"], legacy_participant_id)
+            self.assertNotIn("study_session_id", browser_session)
+        self.assertIn(legacy_participant_id, server.study_sessions)
 
     def test_consent_and_intro_are_required_for_get_post_and_all_gates(self):
         for method, path in (("GET", "/travel-intro"), ("POST", "/travel-intro"), ("GET", "/travel-cities"), ("POST", "/travel-cities")):
@@ -164,7 +176,7 @@ class TravelScreeningTests(unittest.TestCase):
                 with self.client.session_transaction() as browser_session:
                     expected = {"consent_accepted": True, "travel_intro_seen": True}
                     expected.update({
-                        "study_session_id": browser_session["study_session_id"],
+                        "participant_id": browser_session["participant_id"],
                         "study_started_at": browser_session["study_started_at"],
                         "consent_accepted_at": browser_session["consent_accepted_at"],
                     })
@@ -211,7 +223,7 @@ class TravelScreeningTests(unittest.TestCase):
                         with self.client.session_transaction() as browser_session:
                             self.assertEqual(
                                 set(browser_session),
-                                {"consent_accepted", "consent_accepted_at", "study_session_id", "study_started_at", "travel_intro_seen"},
+                                {"consent_accepted", "consent_accepted_at", "participant_id", "study_started_at", "travel_intro_seen"},
                             )
                         self.assert_all_gates_blocked("/travel-intro")
                         self.assert_redirect(self.client.post("/travel-cities", data=self.answers()), "/instructions")
@@ -274,7 +286,7 @@ class TravelScreeningTests(unittest.TestCase):
             "consent_accepted": True, "travel_intro_seen": True,
             "travel_screening_complete": server.SCREENING_VERSION,
             "screening_submission_id": submission_id,
-            "study_session_id": decoded["study_session_id"],
+            "participant_id": decoded["participant_id"],
             "study_started_at": decoded["study_started_at"],
             "consent_accepted_at": decoded["consent_accepted_at"],
         })
@@ -379,7 +391,7 @@ class TravelScreeningTests(unittest.TestCase):
         self.assertNotEqual(first_id, second_id)
         for client, pid, other_id in ((first, "first", second_id), (second, "second", first_id)):
             client.post("/instructions")
-            response = client.post("/api/rooms", json={"participant_id": pid, "screening_submission_id": other_id, "answers": "forged"})
+            response = client.post("/api/rooms", json={"room_participant_id": pid, "screening_submission_id": other_id, "answers": "forged"})
             self.assertEqual(response.status_code, 200)
             self.assertEqual(set(response.get_json()), {"code", "status"} if pid == "first" else {"code", "status", "role"})
         with server.rooms_lock:
@@ -394,15 +406,15 @@ class TravelScreeningTests(unittest.TestCase):
             self.assertEqual(client.get("/dialogue").status_code, 200)
         interviewer, interviewer_id = roles["interviewer"]
         sent = interviewer.post("/api/rooms/ROOM01/messages", json={
-            "participant_id": interviewer_id, "text": "Hello", "screening_submission_id": second_id,
+            "room_participant_id": interviewer_id, "text": "Hello", "screening_submission_id": second_id,
             "answers": first_record["answers"], "truth": "forged", "timestamp": "forged",
             "question_type": "open-ended",
         })
         self.assertEqual(sent.status_code, 201)
         self.assertEqual(set(sent.get_json()), {"message"})
-        self.assertEqual(set(sent.get_json()["message"]), {"id", "participant_id", "role", "text", "is_claim"})
+        self.assertEqual(set(sent.get_json()["message"]), {"id", "room_participant_id", "role", "text", "is_claim"})
         for client, pid in ((first, "first"), (second, "second")):
-            received = client.get(f"/api/rooms/ROOM01/messages?participant_id={pid}").get_json()
+            received = client.get(f"/api/rooms/ROOM01/messages?room_participant_id={pid}").get_json()
             self.assertEqual(set(received), {"messages", "partner_typing", "can_send", "question_number", "question_turns_ended", "dialogue_complete", "seconds_remaining", "transition_complete", "dialogue_number"})
             self.assertEqual(received["dialogue_number"], 1)
             self.assertIsNone(received["seconds_remaining"])
@@ -418,9 +430,9 @@ class TravelScreeningTests(unittest.TestCase):
             server.screening_submissions.pop(first_id)
         self.assert_redirect(first.get("/dialogue"), "/travel-intro")
         self.assertEqual(first.get("/api/rooms/ROOM01").status_code, 403)
-        self.assertEqual(first.post("/api/rooms/ROOM01/messages", json={"participant_id": "first", "text": "Blocked"}).status_code, 403)
-        self.assertEqual(first.get("/api/rooms/ROOM01/messages?participant_id=first").status_code, 403)
-        self.assertEqual(first.post("/api/rooms/ROOM01/typing", json={"participant_id": "first"}).status_code, 403)
+        self.assertEqual(first.post("/api/rooms/ROOM01/messages", json={"room_participant_id": "first", "text": "Blocked"}).status_code, 403)
+        self.assertEqual(first.get("/api/rooms/ROOM01/messages?room_participant_id=first").status_code, 403)
+        self.assertEqual(first.post("/api/rooms/ROOM01/typing", json={"room_participant_id": "first"}).status_code, 403)
         self.assert_redirect(first.post("/travel-cities", data=self.answers(6, "3")), "/instructions")
         replacement_id, _ = self.retained(first)
         self.assertNotEqual(replacement_id, first_id)
@@ -430,7 +442,7 @@ class TravelScreeningTests(unittest.TestCase):
             self.assertEqual(server.rooms["ROOM01"]["ready"], {"first", "second"})
             self.assertEqual(len(server.rooms["ROOM01"]["messages"]), 2)
         first.post("/instructions")
-        self.assertEqual(first.post("/api/rooms", json={"participant_id": "first"}).status_code, 200)
+        self.assertEqual(first.post("/api/rooms", json={"room_participant_id": "first"}).status_code, 200)
         self.assertEqual(first.get("/dialogue").status_code, 200)
 
     def test_screen_out_survives_return_and_resubmission(self):
@@ -462,7 +474,7 @@ class TravelScreeningTests(unittest.TestCase):
                         "consent_accepted": True, "travel_intro_seen": True,
                         "travel_screening_complete": server.SCREENING_VERSION,
                         "screening_submission_id": browser_session["screening_submission_id"],
-                        "study_session_id": browser_session["study_session_id"],
+                        "participant_id": browser_session["participant_id"],
                     })
                 self.assert_all_gates_blocked("/instructions")
 
@@ -530,12 +542,12 @@ class TravelScreeningTests(unittest.TestCase):
             self.assertIs(browser_session["instructions_complete"], True)
         self.assertEqual(self.client.get("/room").status_code, 200)
         self.assert_redirect(self.client.get("/dialogue"), "/room")
-        self.assertEqual(self.client.post("/api/rooms", json={"participant_id": "test"}).status_code, 200)
-        self.assertEqual(self.client.post("/api/rooms", json={"participant_id": "partner"}).status_code, 403)
-        self.assertEqual(self.client.get("/api/rooms/ROOM01?participant_id=test").status_code, 200)
-        self.assertEqual(self.client.post("/api/rooms/ROOM01/messages", json={"participant_id": "test", "text": "Hello"}).status_code, 403)
-        self.assertEqual(self.client.get("/api/rooms/ROOM01/messages?participant_id=test").status_code, 403)
-        self.assertEqual(self.client.post("/api/rooms/ROOM01/typing", json={"participant_id": "test"}).status_code, 403)
+        self.assertEqual(self.client.post("/api/rooms", json={"room_participant_id": "test"}).status_code, 200)
+        self.assertEqual(self.client.post("/api/rooms", json={"room_participant_id": "partner"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/rooms/ROOM01?room_participant_id=test").status_code, 200)
+        self.assertEqual(self.client.post("/api/rooms/ROOM01/messages", json={"room_participant_id": "test", "text": "Hello"}).status_code, 403)
+        self.assertEqual(self.client.get("/api/rooms/ROOM01/messages?room_participant_id=test").status_code, 403)
+        self.assertEqual(self.client.post("/api/rooms/ROOM01/typing", json={"room_participant_id": "test"}).status_code, 403)
         self.assert_redirect(self.client.get("/instructions"), "/room")
         self.assert_redirect(self.client.post("/instructions"), "/room")
 
@@ -557,7 +569,7 @@ class TravelScreeningTests(unittest.TestCase):
         for method, path in (("GET", "/travel-intro"), ("POST", "/travel-intro"), ("GET", "/travel-cities"), ("POST", "/travel-cities")):
             self.assert_redirect(self.client.open(path, method=method, data=self.answers(0)), "/instructions")
         self.assert_redirect(self.client.get("/instructions"), "/room")
-        self.assertEqual(self.client.post("/api/rooms", json={"participant_id": "test"}).status_code, 200)
+        self.assertEqual(self.client.post("/api/rooms", json={"room_participant_id": "test"}).status_code, 200)
 
     def test_new_screening_outcome_invalidates_obsolete_instructions_progress(self):
         for yes_count in (4, 5):

@@ -303,28 +303,28 @@ def archive_completed_room(
     room_state: dict,
     study_sessions: dict,
     screening_submissions: dict,
-    feedback_participant_id: str,
+    feedback_room_participant_id: str,
     feedback_record: dict,
 ) -> bool:
     """Atomically upsert the room snapshot and the submitting participant's feedback."""
     try:
         participants = room_state["participants"]
-        interviewer_id = next(pid for pid, role in participants.items() if role == "interviewer")
-        interviewee_id = next(pid for pid, role in participants.items() if role == "interviewee")
-        study_ids = room_state["study_session_ids"]
+        interviewer_room_participant_id = next(room_participant_id for room_participant_id, role in participants.items() if role == "interviewer")
+        interviewee_room_participant_id = next(room_participant_id for room_participant_id, role in participants.items() if role == "interviewee")
+        participant_ids = room_state["participant_ids"]
         screening_ids = room_state["screening_submission_ids"]
         room_id = room_state["archive_id"]
         participant_models = {}
 
         with db.session.begin():
-            for participant_id in (interviewer_id, interviewee_id):
-                study_id = study_ids[participant_id]
-                submission_id = screening_ids[participant_id]
-                state = study_sessions[study_id]
+            for room_participant_id in (interviewer_room_participant_id, interviewee_room_participant_id):
+                participant_id = participant_ids[room_participant_id]
+                submission_id = screening_ids[room_participant_id]
+                state = study_sessions[participant_id]
                 screening = screening_submissions[submission_id]
-                participant = db.session.get(Participant, study_id)
+                participant = db.session.get(Participant, participant_id)
                 if participant is None:
-                    participant = Participant(study_session_id=study_id)
+                    participant = Participant(study_session_id=participant_id)
                     db.session.add(participant)
                 participant.dataset = current_app.config["STUDY_DATASET"]
                 participant.study_started_at = state.get("study_started_at") or screening["timestamp"]
@@ -337,13 +337,13 @@ def archive_completed_room(
                 participant.instructions_complete = state.get("instructions_complete", False)
                 participant.prolific_redirect_at = state.get("prolific_redirect_at")
                 participant.duration_seconds = state.get("duration_seconds")
-                participant_models[participant_id] = participant
+                participant_models[room_participant_id] = participant
 
                 submission = db.session.get(ScreeningSubmission, submission_id)
                 if submission is None:
                     submission = ScreeningSubmission(submission_id=submission_id)
                     db.session.add(submission)
-                submission.participant_id = study_id
+                submission.participant_id = participant_id
                 submission.version = screening["version"]
                 submission.submitted_at = screening["timestamp"]
                 submission.claim_order = list(screening["order"])
@@ -365,11 +365,11 @@ def archive_completed_room(
                 db.session.add(room)
             room.dataset = current_app.config["STUDY_DATASET"]
             room.room_code = room_code
-            room.condition = room_state["conditions"][interviewer_id]
-            room.interviewer_study_session_id = study_ids[interviewer_id]
-            room.interviewee_study_session_id = study_ids[interviewee_id]
-            room.interviewer_screening_submission_id = screening_ids[interviewer_id]
-            room.interviewee_screening_submission_id = screening_ids[interviewee_id]
+            room.condition = room_state["conditions"][interviewer_room_participant_id]
+            room.interviewer_study_session_id = participant_ids[interviewer_room_participant_id]
+            room.interviewee_study_session_id = participant_ids[interviewee_room_participant_id]
+            room.interviewer_screening_submission_id = screening_ids[interviewer_room_participant_id]
+            room.interviewee_screening_submission_id = screening_ids[interviewee_room_participant_id]
             room.created_at = room_state.get("created_at") or room_state["paired_at"]
             room.paired_at = room_state["paired_at"]
             room.chat_started_at = room_state.get("chat_started_at")
@@ -385,7 +385,7 @@ def archive_completed_room(
                 if message is None:
                     message = Message(sequence=message_data["id"])
                     room.messages.append(message)
-                message.participant_id = study_ids[message_data["participant_id"]]
+                message.participant_id = participant_ids[message_data["room_participant_id"]]
                 message.role = message_data["role"]
                 message.text = message_data["text"]
                 message.question_type = message_data.get("question_type")
@@ -409,8 +409,8 @@ def archive_completed_room(
                 ):
                     setattr(item, field, data[field])
 
-            for participant_id, participant in participant_models.items():
-                state = study_sessions[study_ids[participant_id]]
+            for room_participant_id, participant in participant_models.items():
+                state = study_sessions[participant_ids[room_participant_id]]
                 old_visits = {visit.sequence: visit for visit in participant.page_visits}
                 retained_visits = {visit["sequence"] for visit in state.get("page_visits", [])}
                 for sequence, visit in old_visits.items():
@@ -427,12 +427,12 @@ def archive_completed_room(
                     visit.exited_at = data.get("exited_at")
                     visit.duration_seconds = data.get("duration_seconds")
 
-            participant = participant_models[feedback_participant_id]
+            participant = participant_models[feedback_room_participant_id]
             feedback = db.session.get(Feedback, participant.study_session_id)
             if feedback is None:
                 feedback = Feedback(participant=participant)
                 db.session.add(feedback)
-            source = room_state.get("feedback_submissions", {}).get(feedback_participant_id, feedback_record)
+            source = room_state.get("feedback_submissions", {}).get(feedback_room_participant_id, feedback_record)
             feedback.room_id = room_id
             for field in (
                 "task_skill", "task_difficulty", "task_motivation", "strategy", "additional_feedback",
@@ -447,7 +447,7 @@ def archive_completed_room(
 
 
 def record_prolific_handoff(
-    study_session_id: str,
+    participant_id: str,
     room_id: str,
     redirect_at: str,
     duration_seconds: float | None,
@@ -457,7 +457,7 @@ def record_prolific_handoff(
     """Persist final duration, page visit, and shared room completion timestamps."""
     try:
         with db.session.begin():
-            participant = db.session.get(Participant, study_session_id)
+            participant = db.session.get(Participant, participant_id)
             room = db.session.get(Room, room_id)
             if participant is None or room is None:
                 raise ValueError("The archived participant or room record is missing.")

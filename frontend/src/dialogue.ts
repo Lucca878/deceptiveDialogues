@@ -63,18 +63,18 @@ const mazeControls = role === "interviewee"
   ? document.querySelectorAll<HTMLButtonElement>("[data-maze-direction]")
   : []; // Direction buttons are omitted from the interviewer page.
 const roomCode = sessionStorage.getItem("chat-room-code"); // Active chat room code
-const participantId = sessionStorage.getItem("participant-id"); // Unique identifier for the participant
+const roomParticipantId = sessionStorage.getItem("room-participant-id"); // Temporary identifier bound to this room membership.
 const questionTypeStep = document.querySelector<HTMLDivElement>("#question-type-step"); // Second composer stage shown after Send is selected
 const questionTypeSelect = document.querySelector<HTMLSelectElement>("#question-type"); // Interviewer-only question category selector
 if (
   (role !== "interviewer" && role !== "interviewee") ||
   !roomCode ||
-  !participantId
+  !roomParticipantId
 ) {
   window.location.replace("/room"); // Redirect to the room selection page if required session data is missing
 } else {
   const activeRoomCode = roomCode!; // Non-null assertion for the active chat room code
-  const activeParticipantId = participantId!; // Non-null assertion for the active participant ID
+  const activeRoomParticipantId = roomParticipantId!; // Non-null assertion for the active participant ID
   roleName.textContent = role === "interviewer" ? "Interviewer" : "Interviewee"; // Set the role name in the chat header based on the user's role
   let lastMessageId = 0; // ID of the last message received from the server
   let lastTypingPing = 0; // Timestamp of the last typing ping sent to the server
@@ -238,7 +238,7 @@ if (
     void fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/typing`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ participant_id: activeParticipantId }),
+      body: JSON.stringify({ room_participant_id: activeRoomParticipantId }),
     }).catch(() => {
       // Typing pings are best-effort only. Failures are silently ignored.
     });
@@ -246,7 +246,7 @@ if (
 
   function renderMessage(message: { // Renders a single chat message in the UI
     id: number;
-    participant_id: string;
+    room_participant_id: string;
     role: string;
     text: string;
     is_claim?: boolean;
@@ -257,7 +257,7 @@ if (
 
     const bubble = document.createElement("p"); // Create a new paragraph element for the chat message
     bubble.className = "chat-message"; // Apply the base chat message styling
-    if (message.participant_id !== activeParticipantId) {
+    if (message.room_participant_id !== activeRoomParticipantId) {
       bubble.classList.add("chat-message--remote"); // Style the message as a remote message if it's from the other participant
     }
     bubble.textContent = message.text; // Set the text content of the chat message bubble
@@ -272,14 +272,14 @@ if (
   async function pollMessages(): Promise<void> { // Polls for new messages and updates the chat UI
     try {
       const query = new URLSearchParams({
-        participant_id: activeParticipantId, // Include the participant ID in the query parameters
+        room_participant_id: activeRoomParticipantId, // Identify the bound room membership to the server.
         after_id: String(lastMessageId), // Only fetch messages after the last known message ID
       });
       const response = await fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/messages?${query}`); // Fetch new messages from the server
       const data = await response.json() as {
         messages?: Array<{
           id: number;
-          participant_id: string;
+          room_participant_id: string;
           role: string;
           text: string;
           is_claim?: boolean;
@@ -456,7 +456,7 @@ if (
         const response = await fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/judgement`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ participant_id: activeParticipantId, judgement: truth, confidence: Number(confidence) }),
+          body: JSON.stringify({ room_participant_id: activeRoomParticipantId, judgement: truth, confidence: Number(confidence) }),
         });
         if (!response.ok) throw new Error("Could not submit judgement.");
         // Read the one-time response body once; correctness is present only in the feedback condition.
@@ -503,7 +503,7 @@ if (
       const response = await fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/continue`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ participant_id: activeParticipantId }),
+        body: JSON.stringify({ room_participant_id: activeRoomParticipantId }),
       }); // Ask the server to advance the room after this judgement.
       if (!response.ok) throw new Error("Could not continue to the next claim.");
       // Keep both participants on this page so polling can show the shared countdown.
@@ -534,7 +534,7 @@ if (
       void fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/question-type`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ participant_id: activeParticipantId, question_type: questionType }),
+        body: JSON.stringify({ room_participant_id: activeRoomParticipantId, question_type: questionType }),
       })
         .then(async (response) => {
           const data = await response.json() as { error?: string };
@@ -566,7 +566,7 @@ if (
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        participant_id: activeParticipantId,
+        room_participant_id: activeRoomParticipantId,
         text,
       }),
     }) // Handle the server response for the new message
@@ -574,7 +574,7 @@ if (
         const data = await response.json() as {
           message?: {
             id: number;
-            participant_id: string;
+            room_participant_id: string;
             role: string;
             text: string;
             is_claim?: boolean;
