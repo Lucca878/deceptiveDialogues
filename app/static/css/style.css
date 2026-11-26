@@ -1254,6 +1254,11 @@ h1 {
   min-width: 0;
 }
 
+/* Match the Send/category-submit button height to the question-type selector. */
+#chat-form > .chat-send {
+  min-height: 3.6rem;
+}
+
 .chat-composer > input:focus-visible,
 #question-type:focus-visible,
 .chat-send:focus-visible {

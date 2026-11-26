@@ -74,8 +74,6 @@
         {% if role == 'interviewer' %}
         <!-- Show the category prompt after Send while the server holds the interviewee's turn. -->
         <div class="judgement-step question-type-step" id="question-type-step" hidden>
-          <!-- Explain why this required selection appears after the question is already sent. -->
-          <p class="judgement-instruction">While you wait for the reply, select the question type.</p>
           <select id="question-type" name="question_type" aria-label="Please select a question type" required disabled>
             <option value="" disabled selected>Please select a question type</option>
             <option value="open-ended">Open-ended</option>
