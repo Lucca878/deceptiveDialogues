@@ -1150,24 +1150,42 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             return jsonify(error="It is not your turn to speak."), 403
         question_type = data.get("question_type")
         if role == "interviewer":
-            if question_type is not None and question_type not in ["open-ended", "closed-ended", "follow-up", "clarification", "probing"]:
-                return jsonify(error="A valid question type is required for interviewer messages."), 400
+            # Require the message first and its category through the separate follow-up endpoint.
+            if question_type is not None:
+                return jsonify(error="Submit the message first, then assign its question type."), 400
         else:
             if question_type is not None:
                 return jsonify(error="Interviewee messages cannot have a question type."), 400
+        # Assign the message's one-based turn number from the authoritative server-side question counter.
+        turn_number = room["current_claim"]["interviewer_question_count"] + 1 if role == "interviewer" else room["current_claim"]["interviewer_question_count"]
+        participant_id = room["participant_ids"][room_participant_id]
+        message_timestamp = _utc_timestamp()
+        raw_event_id = token_hex(16)
         message = {
             "id": len(room["messages"]) + 1,
             "room_participant_id": room_participant_id,
             "role": role,
             "text": text,
-            "timestamp": _utc_timestamp(),
+            "timestamp": message_timestamp,
+            "raw_event_id": raw_event_id,
+            "turn_number": turn_number,
         }
         if role == "interviewer":
-            message["question_type"] = question_type
-            if question_type is None:
-                # Keep the interviewee from answering until this message has a server-validated category.
-                room["current_claim"]["pending_question_type_message_id"] = message["id"]
+            # Keep the interviewee from answering until this message has a server-validated category.
+            room["current_claim"]["pending_question_type_message_id"] = message["id"]
         room["messages"].append(message)
+        # Buffer message content with the stable identity and server-derived dialogue/turn coordinates.
+        room["raw_events"].append({
+            "event_id": raw_event_id,
+            "participant_id": participant_id,
+            "room_id": room["archive_id"],
+            "room_code": code.upper(),
+            "event_type": "message_sent",
+            "dialogue_number": room["current_claim"]["dialogue_id"],
+            "turn_number": turn_number,
+            "occurred_at": message_timestamp,
+            "event_data": {"role": role, "message": text, "is_claim": False},
+        })
         # If the accepted message is from the interviewer, increment this claim's question count.
         if role == "interviewer":
             room["current_claim"]["interviewer_question_count"] += 1
@@ -1231,9 +1249,25 @@ def set_question_type(code):
         )
         if message is None or message["room_participant_id"] != room_participant_id:
             return jsonify(error="The pending question could not be found."), 409
+        target_event_id = message.get("raw_event_id")
+        if not isinstance(target_event_id, str):
+            return jsonify(error="The pending question event could not be found."), 409
 
-        # Save private metadata, clear the gate, and grant the interviewee the next turn atomically.
+        # Save private metadata and append a separate raw event linked to the sent question.
+        assigned_at = _utc_timestamp()
         message["question_type"] = question_type
+        room["raw_events"].append({
+            "event_id": token_hex(16),
+            "participant_id": room["participant_ids"][room_participant_id],
+            "room_id": room["archive_id"],
+            "room_code": code.upper(),
+            "event_type": "question_type_assigned",
+            "dialogue_number": room["current_claim"]["dialogue_id"],
+            "turn_number": message["turn_number"],
+            "occurred_at": assigned_at,
+            "event_data": {"target_event_id": target_event_id, "question_type": question_type},
+        })
+        # Clear the turn gate and grant the interviewee the next turn atomically.
         del room["current_claim"]["pending_question_type_message_id"]
         room["next_speaker"] = "interviewee"
 

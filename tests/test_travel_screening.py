@@ -408,11 +408,16 @@ class TravelScreeningTests(unittest.TestCase):
         sent = interviewer.post("/api/rooms/ROOM01/messages", json={
             "room_participant_id": interviewer_id, "text": "Hello", "screening_submission_id": second_id,
             "answers": first_record["answers"], "truth": "forged", "timestamp": "forged",
-            "question_type": "open-ended",
         })
         self.assertEqual(sent.status_code, 201)
         self.assertEqual(set(sent.get_json()), {"message"})
         self.assertEqual(set(sent.get_json()["message"]), {"id", "room_participant_id", "role", "text", "is_claim"})
+        assigned_category = interviewer.post("/api/rooms/ROOM01/question-type", json={
+            "room_participant_id": interviewer_id,
+            "question_type": "open-ended",
+            "screening_submission_id": second_id,
+        })
+        self.assertEqual(assigned_category.status_code, 200)
         for client, pid in ((first, "first"), (second, "second")):
             received = client.get(f"/api/rooms/ROOM01/messages?room_participant_id={pid}").get_json()
             self.assertEqual(set(received), {"messages", "partner_typing", "can_send", "question_number", "question_turns_ended", "dialogue_complete", "seconds_remaining", "transition_complete", "dialogue_number"})

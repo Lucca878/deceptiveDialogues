@@ -144,7 +144,7 @@ class RoomMatchingTests(unittest.TestCase):
 
         sent = sender.post(
             "/api/rooms/ROOM01/messages",
-              json={"room_participant_id": sender_id, "text": "Hello", "timestamp": "client value", "question_type": "open-ended"},
+            json={"room_participant_id": sender_id, "text": "Hello", "timestamp": "client value"},
         )
         self.assertEqual(sent.status_code, 201)
         self.assertNotIn("timestamp", sent.get_json()["message"])
@@ -153,6 +153,11 @@ class RoomMatchingTests(unittest.TestCase):
         timestamp = datetime.fromisoformat(stored_message["timestamp"])
         self.assertEqual(timestamp.tzinfo, timezone.utc)
         self.assertNotEqual(stored_message["timestamp"], "client value")
+        assigned_category = sender.post("/api/rooms/ROOM01/question-type", json={
+            "room_participant_id": sender_id,
+            "question_type": "open-ended",
+        })
+        self.assertEqual(assigned_category.status_code, 200)
 
         received = sender.get(
               f"/api/rooms/ROOM01/messages?room_participant_id={sender_id}&after_id=0"

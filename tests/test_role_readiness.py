@@ -312,7 +312,7 @@ class RoleReadinessTests(unittest.TestCase):
             )])
             self.assertEqual(len(archived_room.messages), len(room["messages"]))
 
-    def test_pairing_and_dialogue_events_batch_at_feedback_and_save_only_once(self):
+    def test_pairing_dialogue_and_chat_events_batch_at_feedback_and_save_only_once(self):
         # Create a real claim through the dialogue route so its start event is timestamped at creation.
         self.pair()
         room = server.rooms["ROOM01"]
@@ -321,6 +321,54 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(self.second.get("/dialogue").status_code, 200)
         claim_event = next(event for event in room["raw_events"] if event["event_type"] == "dialogue_started")
         claim_started_at = room["current_claim"]["started_at"]
+
+        # Send one complete interviewer/interviewee exchange and classify the question separately.
+        interviewer_room_participant_id = next(
+            room_participant_id for room_participant_id, role in room["participants"].items()
+            if role == "interviewer"
+        )
+        interviewee_room_participant_id = next(
+            room_participant_id for room_participant_id, role in room["participants"].items()
+            if role == "interviewee"
+        )
+        clients = {"first": self.first, "second": self.second}
+        interviewer = clients[interviewer_room_participant_id]
+        interviewee = clients[interviewee_room_participant_id]
+        question_response = interviewer.post("/api/rooms/ROOM01/messages", json={
+            "room_participant_id": interviewer_room_participant_id,
+            "text": "What did you enjoy?",
+        })
+        self.assertEqual(question_response.status_code, 201)
+        self.assertNotIn("raw_event_id", question_response.get_json()["message"])
+        question_event = next(
+            event for event in room["raw_events"]
+            if event["event_type"] == "message_sent" and event["event_data"]["role"] == "interviewer"
+        )
+        category_response = interviewer.post("/api/rooms/ROOM01/question-type", json={
+            "room_participant_id": interviewer_room_participant_id,
+            "question_type": "open-ended",
+        })
+        self.assertEqual(category_response.status_code, 200)
+        category_event = next(event for event in room["raw_events"] if event["event_type"] == "question_type_assigned")
+        answer_response = interviewee.post("/api/rooms/ROOM01/messages", json={
+            "room_participant_id": interviewee_room_participant_id,
+            "text": "The museums.",
+        })
+        self.assertEqual(answer_response.status_code, 201)
+        answer_event = next(
+            event for event in room["raw_events"]
+            if event["event_type"] == "message_sent" and event["event_data"]["role"] == "interviewee"
+        )
+        self.assertEqual(question_event["turn_number"], 1)
+        self.assertEqual(answer_event["turn_number"], 1)
+        self.assertEqual(question_event["participant_id"], room["participant_ids"][interviewer_room_participant_id])
+        self.assertEqual(answer_event["participant_id"], room["participant_ids"][interviewee_room_participant_id])
+        self.assertEqual(question_event["event_data"]["role"], "interviewer")
+        self.assertEqual(answer_event["event_data"]["role"], "interviewee")
+        self.assertEqual(category_event["event_data"]["target_event_id"], question_event["event_id"])
+        self.assertEqual(category_event["event_data"]["question_type"], "open-ended")
+
+        # Mark the test dialogue complete so the existing feedback transaction flushes the buffered events.
         room["current_claim_index"] = 10
         room["current_claim"] = None
         room["next_speaker"] = None
@@ -370,12 +418,19 @@ class RoleReadinessTests(unittest.TestCase):
         with server.app.app_context():
             raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
             saved_events = db.session.execute(select(raw_table)).mappings().all()
-        self.assertEqual(len(saved_events), 2)
+        self.assertEqual(len(saved_events), 5)
         self.assertTrue(all(saved_event["study_run_id"] == "test" for saved_event in saved_events))
         self.assertEqual(
             {saved_event["event_id"] for saved_event in saved_events},
-            {paired_event["event_id"], claim_event["event_id"]},
+            {
+                paired_event["event_id"], claim_event["event_id"], question_event["event_id"],
+                category_event["event_id"], answer_event["event_id"],
+            },
         )
+        persisted_question_event = next(saved_event for saved_event in saved_events if saved_event["event_id"] == question_event["event_id"])
+        self.assertEqual(persisted_question_event["event_data"]["message"], "What did you enjoy?")
+        persisted_category_event = next(saved_event for saved_event in saved_events if saved_event["event_id"] == category_event["event_id"])
+        self.assertEqual(persisted_category_event["event_data"]["target_event_id"], question_event["event_id"])
         persisted_pair = next(saved_event for saved_event in saved_events if saved_event["event_type"] == "room_paired")
         self.assertEqual(persisted_pair["occurred_at"], datetime.fromisoformat(room["paired_at"]).replace(tzinfo=None))
         persisted_claim = next(saved_event for saved_event in saved_events if saved_event["event_type"] == "dialogue_started")
@@ -388,7 +443,10 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(second_feedback.status_code, 302)
         with server.app.app_context():
             saved_count = db.session.execute(select(raw_table.c.event_id)).scalars().all()
-        self.assertCountEqual(saved_count, [paired_event["event_id"], claim_event["event_id"]])
+        self.assertCountEqual(saved_count, [
+            paired_event["event_id"], claim_event["event_id"], question_event["event_id"],
+            category_event["event_id"], answer_event["event_id"],
+        ])
 
     def test_second_feedback_updates_same_archived_room(self):
         room = self.complete_dialogues()
@@ -646,7 +704,7 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(room["current_claim"]["interviewer_question_count"], 1)
         self.assertIsNone(room["next_speaker"])
         pending_message = room["messages"][-1]
-        self.assertIsNone(pending_message["question_type"])
+        self.assertIsNone(pending_message.get("question_type"))
         self.assertEqual(
             room["current_claim"]["pending_question_type_message_id"],
             pending_message["id"],
@@ -710,12 +768,35 @@ class RoleReadinessTests(unittest.TestCase):
         room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_message_turn()
         endpoint = "/api/rooms/ROOM01/messages"
 
-        interviewer_question = interviewer.post(endpoint, json={
+        bypassed_category = interviewer.post(endpoint, json={
             "room_participant_id": interviewer_id,
             "text": "What did you enjoy about the city?",
             "question_type": "follow-up",
         })
+        self.assertEqual(bypassed_category.status_code, 400)
+        self.assertEqual(len(room["messages"]), 1)
+
+        interviewer_question = interviewer.post(endpoint, json={
+            "room_participant_id": interviewer_id,
+            "text": "What did you enjoy about the city?",
+        })
         self.assertEqual(interviewer_question.status_code, 201)
+        self.assertIsNone(room["next_speaker"])
+
+        premature_answer = interviewee.post(endpoint, json={
+            "room_participant_id": interviewee_id,
+            "text": "I enjoyed the museums.",
+        })
+        self.assertEqual(premature_answer.status_code, 403)
+        self.assertIsNone(room["next_speaker"])
+        self.assertEqual(len(room["messages"]), 2)
+
+        category = interviewer.post("/api/rooms/ROOM01/question-type", json={
+            "room_participant_id": interviewer_id,
+            "question_type": "follow-up",
+        })
+        self.assertEqual(category.status_code, 200)
+        self.assertEqual(room["next_speaker"], "interviewee")
 
         rejected_answer = interviewee.post(endpoint, json={
             "room_participant_id": interviewee_id,
@@ -724,7 +805,6 @@ class RoleReadinessTests(unittest.TestCase):
         })
         self.assertEqual(rejected_answer.status_code, 400)
         self.assertEqual(room["next_speaker"], "interviewee")
-        self.assertEqual(len(room["messages"]), 2)
 
         accepted_answer = interviewee.post(endpoint, json={
             "room_participant_id": interviewee_id,
@@ -915,20 +995,37 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(room["next_speaker"], "interviewer")
 
         # Test that an accepted interviewer message makes the interviewee the next allowed speaker.
-        interviewer_message = interviewer.post(
+        bypassed_category = interviewer.post(
             "/api/rooms/ROOM01/messages",
             json={"room_participant_id": interviewer_id, "text": "Question 1?", "role": "spoof", "question_type": "open-ended"},
         )
+        self.assertEqual(bypassed_category.status_code, 400)
+        self.assertEqual(len(room["messages"]), 1)
+
+        interviewer_message = interviewer.post(
+            "/api/rooms/ROOM01/messages",
+            json={"room_participant_id": interviewer_id, "text": "Question 1?", "role": "spoof"},
+        )
         self.assertEqual(interviewer_message.status_code, 201)
         self.assertEqual(interviewer_message.get_json()["message"]["role"], "interviewer")
-        self.assertEqual(room["next_speaker"], "interviewee")
+        self.assertIsNone(room["next_speaker"])
         self.assertEqual(len(room["messages"]), 2)
         interviewer_poll = interviewer.get(f"/api/rooms/ROOM01/messages?room_participant_id={interviewer_id}").get_json()
         interviewee_poll = interviewee.get(f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}").get_json()
         self.assertIs(interviewer_poll["can_send"], False)
-        self.assertIs(interviewee_poll["can_send"], True)
+        self.assertIs(interviewee_poll["can_send"], False)
         self.assertEqual(interviewer_poll["question_number"], 1)
         self.assertEqual(interviewee_poll["question_number"], 1)
+        self.assertTrue(interviewer_poll["question_type_pending"])
+
+        category = interviewer.post("/api/rooms/ROOM01/question-type", json={
+            "room_participant_id": interviewer_id,
+            "question_type": "open-ended",
+        })
+        self.assertEqual(category.status_code, 200)
+        self.assertEqual(room["next_speaker"], "interviewee")
+        interviewee_poll = interviewee.get(f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}").get_json()
+        self.assertIs(interviewee_poll["can_send"], True)
 
         # Test that an out-of-turn rejection does not change whose turn it is.
         rejected_repeat = interviewer.post(
@@ -958,10 +1055,20 @@ class RoleReadinessTests(unittest.TestCase):
         for question_number in range(2, 11):
             question = interviewer.post(
                 "/api/rooms/ROOM01/messages",
-                json={"room_participant_id": interviewer_id, "text": f"Question {question_number}?", "question_type": "open-ended"},
+                json={"room_participant_id": interviewer_id, "text": f"Question {question_number}?"},
             )
             self.assertEqual(question.status_code, 201)
             self.assertEqual(room["current_claim"]["interviewer_question_count"], question_number)
+            during_category_turn = interviewee.get(
+                f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}"
+            ).get_json()
+            self.assertIs(during_category_turn["can_send"], False)
+
+            category = interviewer.post("/api/rooms/ROOM01/question-type", json={
+                "room_participant_id": interviewer_id,
+                "question_type": "open-ended",
+            })
+            self.assertEqual(category.status_code, 200)
             during_answer_turn = interviewee.get(
                 f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}"
             ).get_json()
