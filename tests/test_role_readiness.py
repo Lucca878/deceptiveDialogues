@@ -537,45 +537,77 @@ class RoleReadinessTests(unittest.TestCase):
             self.assertEqual(first_final_visit.exited_at, first_redirect_time)
             self.assertEqual(first_final_visit.duration_seconds, 60.0)
 
-    def test_interviewer_message_requires_valid_category_and_stores_it_privately(self):
+    def test_interviewer_category_is_selected_after_send_and_gates_the_reply(self):
         room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_message_turn()
         endpoint = "/api/rooms/ROOM01/messages"
 
-        missing_category = interviewer.post(endpoint, json={
+        sent_question = interviewer.post(endpoint, json={
             "participant_id": interviewer_id,
             "text": "What did you enjoy about the city?",
         })
-        self.assertEqual(missing_category.status_code, 400)
-        self.assertEqual(room["current_claim"]["interviewer_question_count"], 0)
-        self.assertEqual(room["next_speaker"], "interviewer")
+        self.assertEqual(sent_question.status_code, 201)
+        self.assertEqual(room["current_claim"]["interviewer_question_count"], 1)
+        self.assertIsNone(room["next_speaker"])
+        pending_message = room["messages"][-1]
+        self.assertIsNone(pending_message["question_type"])
+        self.assertEqual(
+            room["current_claim"]["pending_question_type_message_id"],
+            pending_message["id"],
+        )
+        interviewer_poll = interviewer.get(endpoint, query_string={"participant_id": interviewer_id}).get_json()
+        self.assertIs(interviewer_poll["can_send"], False)
+        self.assertIs(interviewer_poll["question_type_pending"], True)
+        self.assertEqual(interviewer_poll["question_number"], 1)
 
-        invalid_category = interviewer.post(endpoint, json={
+        # The interviewee can see the sent question but cannot reply before classification.
+        interviewee_poll = interviewee.get(endpoint, query_string={"participant_id": interviewee_id}).get_json()
+        self.assertIs(interviewee_poll["can_send"], False)
+        self.assertNotIn("question_type_pending", interviewee_poll)
+        interviewer_repeat = interviewer.post(endpoint, json={
             "participant_id": interviewer_id,
-            "text": "What did you enjoy about the city?",
+            "text": "A second question cannot be sent yet.",
+        })
+        self.assertEqual(interviewer_repeat.status_code, 403)
+        premature_reply = interviewee.post(endpoint, json={
+            "participant_id": interviewee_id,
+            "text": "I enjoyed the museums.",
+        })
+        self.assertEqual(premature_reply.status_code, 403)
+        self.assertIn("not your turn", premature_reply.get_json()["error"].lower())
+
+        invalid_category = interviewer.post("/api/rooms/ROOM01/question-type", json={
+            "participant_id": interviewer_id,
             "question_type": "unsupported",
         })
         self.assertEqual(invalid_category.status_code, 400)
-        self.assertEqual(room["current_claim"]["interviewer_question_count"], 0)
-        self.assertEqual(room["next_speaker"], "interviewer")
-        self.assertEqual(len(room["messages"]), 1)  # Only the server-generated opening claim exists.
+        self.assertIsNone(room["next_speaker"])
 
-        accepted = interviewer.post(endpoint, json={
+        accepted = interviewer.post("/api/rooms/ROOM01/question-type", json={
             "participant_id": interviewer_id,
-            "text": "What did you enjoy about the city?",
             "question_type": "open-ended",
         })
-        self.assertEqual(accepted.status_code, 201)
-        projected_message = accepted.get_json()["message"]
-        self.assertNotIn("question_type", projected_message)
-        saved_message = room["messages"][-1]
-        self.assertEqual(saved_message["question_type"], "open-ended")
-        self.assertEqual(saved_message["role"], "interviewer")
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(pending_message["question_type"], "open-ended")
+        self.assertEqual(pending_message["role"], "interviewer")
+        self.assertNotIn("pending_question_type_message_id", room["current_claim"])
+        self.assertEqual(room["next_speaker"], "interviewee")
+        self.assertIs(interviewee.get(endpoint, query_string={"participant_id": interviewee_id}).get_json()["can_send"], True)
+        answer = interviewee.post(endpoint, json={
+            "participant_id": interviewee_id,
+            "text": "I enjoyed the museums.",
+        })
+        self.assertEqual(answer.status_code, 201)
+        self.assertEqual(room["next_speaker"], "interviewer")
 
         # Neither the interviewer nor interviewee receives the server-only category through polling.
         for client, participant_id in ((interviewer, interviewer_id), (interviewee, interviewee_id)):
             poll = client.get(endpoint, query_string={"participant_id": participant_id}).get_json()
-            question = next(message for message in poll["messages"] if message["id"] == saved_message["id"])
+            question = next(message for message in poll["messages"] if message["id"] == pending_message["id"])
             self.assertNotIn("question_type", question)
+
+        interviewer_poll = interviewer.get(endpoint, query_string={"participant_id": interviewer_id}).get_json()
+        self.assertNotIn("question_type_pending", interviewer_poll)
+        self.assertIs(interviewer_poll["can_send"], True)
 
     def test_interviewee_messages_reject_category_and_store_no_category(self):
         room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_message_turn()
@@ -728,6 +760,7 @@ class RoleReadinessTests(unittest.TestCase):
             else:
                 self.assertNotIn(b'id="transition-maze"', dialogue_response.data)
                 self.assertIn(b'id="question-type-step" hidden', dialogue_response.data)
+                self.assertIn(b"While you wait for the reply, select the question type.", dialogue_response.data)
                 self.assertIn(b'aria-label="Please select a question type"', dialogue_response.data)
                 self.assertIn(b"Please select a question type", dialogue_response.data)
                 self.assertIn(b'id="question-type" name="question_type"', dialogue_response.data)

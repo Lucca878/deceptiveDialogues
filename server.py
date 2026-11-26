@@ -1104,7 +1104,7 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             return jsonify(error="It is not your turn to speak."), 403
         question_type = data.get("question_type")
         if role == "interviewer":
-            if question_type not in ["open-ended", "closed-ended", "follow-up", "clarification", "probing"]:
+            if question_type is not None and question_type not in ["open-ended", "closed-ended", "follow-up", "clarification", "probing"]:
                 return jsonify(error="A valid question type is required for interviewer messages."), 400
         else:
             if question_type is not None:
@@ -1118,6 +1118,9 @@ def send_room_message(code): # Handles sending a message to a specific room by a
         }
         if role == "interviewer":
             message["question_type"] = question_type
+            if question_type is None:
+                # Keep the interviewee from answering until this message has a server-validated category.
+                room["current_claim"]["pending_question_type_message_id"] = message["id"]
         room["messages"].append(message)
         # If the accepted message is from the interviewer, increment this claim's question count.
         if role == "interviewer":
@@ -1137,11 +1140,58 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             room["current_claim"]["judgement_started_at"] = message["timestamp"]
         if room["current_claim"].get("question_turns_ended"):
             room["next_speaker"] = None
+        elif room["current_claim"].get("pending_question_type_message_id") is not None:
+            # Pause turn-taking while the interviewer classifies the question they just sent.
+            room["next_speaker"] = None
         else:
             # Otherwise, switch the next allowed speaker to the other role.
             room["next_speaker"] = "interviewer" if role == "interviewee" else "interviewee"
 
     return jsonify(message=_message_for_client(message)), 201 # Return the newly created message without its private timestamp
+
+
+@app.post("/api/rooms/<code>/question-type")
+@consent_required
+@screening_required
+@instructions_required
+def set_question_type(code):
+    # Accept a category only for the interviewer’s pending message in the active dialogue.
+    data = request.get_json(silent=True) or {}
+    participant_id = _get_participant_id(data)
+    question_type = data.get("question_type") if isinstance(data, dict) else None
+    allowed_question_types = ["open-ended", "closed-ended", "follow-up", "clarification", "probing"]
+    if participant_id is None:
+        return jsonify(error="A participant ID is required."), 400
+    if question_type not in allowed_question_types:
+        return jsonify(error="A valid question type is required."), 400
+
+    with rooms_lock:
+        # Bind the request to its assigned room and reject stale or unrelated participants.
+        room, participant_id = _bound_room(code, participant_id)
+        if room is None or not _chat_ready(room):
+            return jsonify(error="Both participants must be ready in your assigned room."), 403
+        if room["current_claim"] is None:
+            return jsonify(error="There is no active question to categorize."), 403
+        if room["participants"].get(participant_id) != "interviewer":
+            return jsonify(error="Only the interviewer can categorize a question."), 403
+
+        # Require the one pending message rather than allowing a category to be changed later.
+        pending_message_id = room["current_claim"].get("pending_question_type_message_id")
+        if pending_message_id is None:
+            return jsonify(error="There is no question waiting for a category."), 403
+        message = next(
+            (item for item in room["messages"] if item["id"] == pending_message_id),
+            None,
+        )
+        if message is None or message["participant_id"] != participant_id:
+            return jsonify(error="The pending question could not be found."), 409
+
+        # Save private metadata, clear the gate, and grant the interviewee the next turn atomically.
+        message["question_type"] = question_type
+        del room["current_claim"]["pending_question_type_message_id"]
+        room["next_speaker"] = "interviewee"
+
+    return jsonify(ok=True), 200
 
 
 # POST endpoint for the interviewer to submit a true/false judgement and 0–100 confidence after all ten answers; derive the role and active dialogue ID from the bound room, then store the judgement on its current_claim.
@@ -1322,8 +1372,14 @@ def get_room_messages(code):
         current_claim = room["current_claim"]
         question_count = current_claim["interviewer_question_count"] if current_claim else 0
         question_turns_ended = bool(current_claim and current_claim.get("question_turns_ended"))
+        question_type_pending = bool(
+            current_claim and current_claim.get("pending_question_type_message_id") is not None
+        )
         if question_turns_ended:
             question_number = 10
+        elif question_type_pending:
+            # Keep both participants on the question that was sent but is not yet answerable.
+            question_number = max(question_count, 1)
         elif room["next_speaker"] == "interviewee":
             question_number = max(question_count, 1)
         else:
@@ -1338,8 +1394,12 @@ def get_room_messages(code):
         dialogue_number = current_claim["dialogue_id"] if current_claim else None
         # This response is bound to the requester; it exposes no city answer or claim truth.
         can_send = room["next_speaker"] == room["participants"][participant_id]
+        # Only the interviewer needs to know why the turn is paused; the category itself stays private.
+        interviewer_question_type_pending = (
+            question_type_pending and room["participants"][participant_id] == "interviewer"
+        )
 
-    return jsonify(
+    response_data = dict(
         messages=messages,
         partner_typing=partner_typing,
         can_send=can_send,
@@ -1350,3 +1410,7 @@ def get_room_messages(code):
         transition_complete=transition_complete,
         dialogue_number=dialogue_number,
     )
+    if interviewer_question_type_pending:
+        # Keep category-workflow state out of the interviewee's response.
+        response_data["question_type_pending"] = True
+    return jsonify(response_data)

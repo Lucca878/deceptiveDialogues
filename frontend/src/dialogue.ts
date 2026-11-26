@@ -81,7 +81,7 @@ if (
   let openingClaimReceived = false; // Flag indicating whether the opening claim from the interviewee has been received
   // Track the server's can_send value and use it to enable/disable both composer controls.
   let canSend = false; // Flag indicating whether the server allows this participant to send messages
-  let selectingQuestionType = false; // Tracks whether the interviewer is confirming a category for a drafted question.
+  let selectingQuestionType = false; // Tracks whether the sent interviewer question still needs a category.
   let messageRequestPending = false; // Prevents duplicate message submissions while the server is processing one.
   const renderedMessageIds = new Set<number>(); // Set of message IDs that have already been rendered to avoid duplicates
   const mazeSize = 9; // Increase the optional client-only maze to make routes less predictable.
@@ -286,6 +286,7 @@ if (
         }>; // Array of new messages from the server
         partner_typing?: boolean;
         can_send?: boolean;
+        question_type_pending?: boolean;
         question_number?: number;
         question_turns_ended?: boolean;
         dialogue_complete?: boolean;
@@ -325,6 +326,14 @@ if (
         return;
       }
       canSend = data.can_send === true;  // Update the canSend flag based on the server's response
+      const questionTypePending = role === "interviewer" && data.question_type_pending === true;
+      if (questionTypePending && !selectingQuestionType) {
+        // Restore the category step if the interviewer reloads while a question is awaiting classification.
+        setQuestionTypeStep(true);
+      } else if (!questionTypePending && selectingQuestionType && !messageRequestPending) {
+        // Hide the category step once the server confirms the gate has been cleared.
+        setQuestionTypeStep(false);
+      }
       if (Number.isInteger(data.dialogue_number) && data.dialogue_number! >= 1 && data.dialogue_number! <= 10) {
         const dialogueNumber = data.dialogue_number!;
         dialogueCounter.textContent = `Dialogue ${dialogueNumber} of 10`;
@@ -361,9 +370,11 @@ if (
         renderMessage(message); // Render the new message in the chat UI
       }
       input.disabled = selectingQuestionType || !canSend || !openingClaimReceived;
-      sendButton.disabled = messageRequestPending || !canSend || !openingClaimReceived;
+      sendButton.disabled = selectingQuestionType
+        ? messageRequestPending || !questionTypePending
+        : messageRequestPending || !canSend || !openingClaimReceived;
       if (questionTypeSelect) {
-        questionTypeSelect.disabled = !selectingQuestionType || messageRequestPending || !canSend;
+        questionTypeSelect.disabled = !selectingQuestionType || messageRequestPending || !questionTypePending;
       }
     } catch (error) {
       console.error(error instanceof Error ? error.message : "Could not load messages."); // Log any errors encountered during message polling
@@ -375,6 +386,17 @@ if (
   void pollMessages(); // Start polling for new messages immediately
 
   input.addEventListener("input", pingTyping);
+
+  function setQuestionTypeStep(show: boolean): void {
+    // Keep the text composer and category selector mutually exclusive for interviewer turns.
+    if (!questionTypeSelect || !questionTypeStep) return;
+    selectingQuestionType = show;
+    input.hidden = show;
+    input.disabled = show || !canSend || !openingClaimReceived;
+    questionTypeStep.hidden = !show;
+    questionTypeSelect.disabled = !show;
+    sendButton.textContent = show ? "Submit question type" : "Send";
+  }
 
   const confidenceInput = document.getElementById("judgement-confidence") as HTMLInputElement | null;
   const confidenceOutput = document.getElementById("confidence-output") as HTMLOutputElement | null;
@@ -499,30 +521,46 @@ if (
     event.preventDefault(); // Prevent the default form submission behavior
 
     if (!openingClaimReceived || messageRequestPending) return;
+    if (questionTypeSelect && selectingQuestionType) {
+      // Submit the category for the already-sent question before enabling the interviewee's reply.
+      const questionType = questionTypeSelect.value;
+      if (!questionType) {
+        questionTypeSelect.reportValidity();
+        return;
+      }
+      messageRequestPending = true;
+      questionTypeSelect.disabled = true;
+      sendButton.disabled = true;
+      void fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/question-type`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ participant_id: activeParticipantId, question_type: questionType }),
+      })
+        .then(async (response) => {
+          const data = await response.json() as { error?: string };
+          if (!response.ok) throw new Error(data.error ?? "Could not save the question type.");
+          questionTypeSelect.value = "";
+          setQuestionTypeStep(false);
+        })
+        .catch((error: unknown) => {
+          console.error(error instanceof Error ? error.message : "Could not save the question type.");
+        })
+        .finally(() => {
+          // Leave the category available for retry if the server did not accept it.
+          messageRequestPending = false;
+          questionTypeSelect.disabled = !selectingQuestionType;
+          sendButton.disabled = !selectingQuestionType;
+          if (selectingQuestionType) questionTypeSelect.focus();
+          else if (canSend) input.focus();
+        });
+      return;
+    }
     const text = input.value.trim(); // Get the trimmed text from the input field
     if (!text) return; // Do nothing if the input is empty
-    if (questionTypeSelect && questionTypeStep && !selectingQuestionType) {
-      // Preserve the draft and request its category before sending it to the server.
-      selectingQuestionType = true;
-      input.hidden = true;
-      input.disabled = true;
-      questionTypeStep.hidden = false;
-      questionTypeSelect.disabled = false;
-      sendButton.textContent = "Submit question type";
-      questionTypeSelect.focus();
-      return;
-    }
-
-    const questionType = questionTypeSelect?.value;
-    if (questionTypeSelect && !questionType) {
-      questionTypeSelect.reportValidity();
-      return;
-    }
 
     messageRequestPending = true;
     input.disabled = true;
     sendButton.disabled = true;
-    if (questionTypeSelect) questionTypeSelect.disabled = true;
 
     void fetch(`/api/rooms/${encodeURIComponent(activeRoomCode)}/messages`, { // Send a new message to the server
       method: "POST",
@@ -530,7 +568,6 @@ if (
       body: JSON.stringify({
         participant_id: activeParticipantId,
         text,
-        ...(questionTypeSelect ? { question_type: questionType } : {}),
       }),
     }) // Handle the server response for the new message
       .then(async (response) => { // Process the server response for the new message
@@ -549,12 +586,10 @@ if (
         renderMessage(data.message); // Render the newly sent message in the chat UI
         input.value = ""; // Clear the draft only after the server accepts the message.
         if (questionTypeSelect && questionTypeStep) {
-          questionTypeSelect.value = ""; // Reset the category for the next interviewer question.
-          questionTypeSelect.disabled = true;
-          questionTypeStep.hidden = true;
-          selectingQuestionType = false;
-          input.hidden = false;
-          sendButton.textContent = "Send";
+          // Ask for the category only after the server has accepted and displayed the message.
+          questionTypeSelect.value = "";
+          setQuestionTypeStep(true);
+          questionTypeSelect.focus();
         }
       })
       .catch((error: unknown) => {
@@ -564,9 +599,11 @@ if (
         // Keep controls disabled until both the request and server turn state allow another message.
         messageRequestPending = false;
         input.disabled = selectingQuestionType || !canSend || !openingClaimReceived;
-        sendButton.disabled = !canSend || !openingClaimReceived;
+        sendButton.disabled = selectingQuestionType
+          ? messageRequestPending
+          : !canSend || !openingClaimReceived;
         if (questionTypeSelect) {
-          questionTypeSelect.disabled = !selectingQuestionType || !canSend;
+          questionTypeSelect.disabled = !selectingQuestionType;
         }
         if (selectingQuestionType) {
           questionTypeSelect?.focus(); // Return focus to the category control if submission failed.

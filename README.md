@@ -181,7 +181,34 @@ Flask serves the study pages and temporarily holds active screening submissions,
 
 ## Data collection
 
-The TEST archive stores participant, room, screening, message, dialogue, page-visit, judgement, feedback, and server-side timing records. Active room state is still process-memory only, so a restart clears ongoing sessions; submitted records remain in the configured database. Export the archive to a private directory with `flask --app server export-study --output <private-directory>`. The command writes participant and room CSVs, JSON datasets, and one JSON file per room. Do not place exports under public static assets.
+The TEST archive stores participant, room, screening, message, dialogue, page-visit, judgement, feedback, and server-side timing records. Active room state is still process-memory only, so a restart clears ongoing sessions; submitted records remain in the configured database. A room is archived when a participant submits feedback. The export command reads the configured database and creates separate CSV/JSON files; downloading the SQLite database file alone does **not** create those exports.
+
+#### Export CSV and JSON files from the VPS
+
+Run these commands in a terminal on your Mac from any directory. They connect to the VPS, create an export in a private directory outside the web checkout, then download that directory to `~/study2-exports/`. The timestamped name allows repeat exports without overwriting earlier ones.
+
+```sh
+EXPORT_NAME="study2-$(date +%Y-%m-%d-%H%M%S)"
+ssh root@157.90.127.76 "install -d -o www-data -g www-data -m 0750 /var/lib/study2/test/exports && cd /var/www/study2 && sudo -u www-data env STUDY_DATASET=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/test/study2-test.sqlite .venv/bin/flask --app server export-study --output /var/lib/study2/test/exports/$EXPORT_NAME --dataset test"
+mkdir -p -m 700 "$HOME/study2-exports"
+scp -r "root@157.90.127.76:/var/lib/study2/test/exports/$EXPORT_NAME" "$HOME/study2-exports/"
+```
+
+The downloaded folder contains `participants.csv`, `rooms.csv`, `participants.json`, `rooms.json`, `complete.json`, and a `rooms/` directory with one JSON file per room. Open the CSV files in a spreadsheet application or use the JSON files for structured data processing. These exports contain research data: keep them private, do not commit them to Git, and do not put them in a public web directory. The SSH command may prompt for your server login; enter credentials only in your terminal.
+
+To download the raw SQLite database instead, use this separate command (it does not generate CSV/JSON files):
+
+```sh
+scp root@157.90.127.76:/var/lib/study2/test/study2-test.sqlite "$HOME/study2-test.sqlite"
+```
+
+If the database may be receiving writes while you copy it, prefer the export steps above so the app creates a consistent set of CSV/JSON files using SQLite's normal database connection.
+
+To open the export folder in finder run:
+
+```sh
+open "$HOME/study2-exports"
+```
 
 ## Deployment
 
