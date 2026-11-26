@@ -534,6 +534,22 @@ def dialogue():
                 "judgement_submitted_at": None,
                 "judgement_duration_seconds": None,
             }
+            # Buffer the dialogue boundary and claim facts together so the room export can be derived from raw events.
+            room["raw_events"].append({
+                "event_id": token_hex(16),
+                "participant_id": room["participant_ids"][interviewee_room_participant_id],
+                "room_id": room["archive_id"],
+                "room_code": session["room_code"],
+                "event_type": "dialogue_started",
+                "dialogue_number": room["current_claim"]["dialogue_id"],
+                "started_at": claim_started_at,
+                "event_data": {
+                    "role": "interviewee",
+                    "city_id": next_city,
+                    "claim": claim_message["text"],
+                    "ground_truth": room["current_claim"]["truth_status"],
+                },
+            })
             # Initialize the interviewer-question counter for this claim to zero. Store the count in this room's current_claim state, so it resets for each new claim.
             room["current_claim"]["interviewer_question_count"] = 0
             # After creating the opening claim, set the room's next speaker to "interviewer".

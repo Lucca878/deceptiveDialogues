@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 import unittest
 from unittest.mock import patch
 
@@ -311,28 +312,48 @@ class RoleReadinessTests(unittest.TestCase):
             )])
             self.assertEqual(len(archived_room.messages), len(room["messages"]))
 
-    def test_room_paired_event_is_batched_at_feedback_and_saved_only_once(self):
-        room = self.complete_dialogues()
-        self.assertEqual(len(room["raw_events"]), 1)
-        event = room["raw_events"][0]
-        self.assertEqual(event["event_type"], "room_paired")
-        self.assertEqual(event["room_id"], room["archive_id"])
-        self.assertEqual(event["room_code"], "ROOM01")
-        self.assertEqual(event["occurred_at"], room["paired_at"])
-        self.assertIsNone(event.get("participant_id"))
-        self.assertEqual(event["event_data"]["condition"], room["conditions"][
+    def test_pairing_and_dialogue_events_batch_at_feedback_and_save_only_once(self):
+        # Create a real claim through the dialogue route so its start event is timestamped at creation.
+        self.pair()
+        room = server.rooms["ROOM01"]
+        room["ready"].update(room["participants"])
+        self.assertEqual(self.first.get("/dialogue").status_code, 200)
+        self.assertEqual(self.second.get("/dialogue").status_code, 200)
+        claim_event = next(event for event in room["raw_events"] if event["event_type"] == "dialogue_started")
+        claim_started_at = room["current_claim"]["started_at"]
+        room["current_claim_index"] = 10
+        room["current_claim"] = None
+        room["next_speaker"] = None
+
+        paired_event = next(event for event in room["raw_events"] if event["event_type"] == "room_paired")
+        self.assertEqual(paired_event["room_id"], room["archive_id"])
+        self.assertEqual(paired_event["room_code"], "ROOM01")
+        self.assertEqual(paired_event["occurred_at"], room["paired_at"])
+        self.assertIsNone(paired_event.get("participant_id"))
+        self.assertEqual(paired_event["event_data"]["condition"], room["conditions"][
             next(room_participant_id for room_participant_id, role in room["participants"].items() if role == "interviewer")
         ])
         self.assertCountEqual(
-            [entry["participant_id"] for entry in event["event_data"]["participants"]],
+            [entry["participant_id"] for entry in paired_event["event_data"]["participants"]],
             list(room["participant_ids"].values()),
         )
         self.assertCountEqual(
-            [entry["role"] for entry in event["event_data"]["participants"]],
+            [entry["role"] for entry in paired_event["event_data"]["participants"]],
             ["interviewer", "interviewee"],
         )
+        interviewee_room_participant_id = next(
+            room_participant_id for room_participant_id, role in room["participants"].items()
+            if role == "interviewee"
+        )
+        self.assertEqual(claim_event["event_type"], "dialogue_started")
+        self.assertEqual(claim_event["participant_id"], room["participant_ids"][interviewee_room_participant_id])
+        self.assertEqual(claim_event["dialogue_number"], 1)
+        self.assertEqual(claim_event["started_at"], claim_started_at)
+        self.assertEqual(claim_event["event_data"]["role"], "interviewee")
+        self.assertIn("claim", claim_event["event_data"])
+        self.assertIsInstance(claim_event["event_data"]["ground_truth"], bool)
 
-        # Pairing only buffers the raw row; the configured save-at-feedback policy persists it later.
+        # Study actions only buffer raw rows; the configured save-at-feedback policy persists them later.
         with server.app.app_context():
             raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
             self.assertEqual(db.session.execute(select(raw_table)).mappings().all(), [])
@@ -349,17 +370,25 @@ class RoleReadinessTests(unittest.TestCase):
         with server.app.app_context():
             raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
             saved_events = db.session.execute(select(raw_table)).mappings().all()
-        self.assertEqual(len(saved_events), 1)
-        self.assertEqual(saved_events[0]["study_run_id"], "test")
-        self.assertEqual(saved_events[0]["event_id"], event["event_id"])
-        self.assertEqual(saved_events[0]["event_data"]["condition"], event["event_data"]["condition"])
+        self.assertEqual(len(saved_events), 2)
+        self.assertTrue(all(saved_event["study_run_id"] == "test" for saved_event in saved_events))
+        self.assertEqual(
+            {saved_event["event_id"] for saved_event in saved_events},
+            {paired_event["event_id"], claim_event["event_id"]},
+        )
+        persisted_pair = next(saved_event for saved_event in saved_events if saved_event["event_type"] == "room_paired")
+        self.assertEqual(persisted_pair["occurred_at"], datetime.fromisoformat(room["paired_at"]).replace(tzinfo=None))
+        persisted_claim = next(saved_event for saved_event in saved_events if saved_event["event_type"] == "dialogue_started")
+        self.assertEqual(persisted_claim["event_data"]["claim"], claim_event["event_data"]["claim"])
+        self.assertEqual(persisted_claim["event_data"]["ground_truth"], claim_event["event_data"]["ground_truth"])
+        self.assertEqual(persisted_claim["started_at"], datetime.fromisoformat(claim_started_at).replace(tzinfo=None))
 
-        # The second feedback transaction sees the same buffered event but must not insert a duplicate row.
+        # The second feedback transaction sees the same buffered events but must not insert duplicate rows.
         second_feedback = self.second.post("/submit_feedback", data=feedback_data)
         self.assertEqual(second_feedback.status_code, 302)
         with server.app.app_context():
             saved_count = db.session.execute(select(raw_table.c.event_id)).scalars().all()
-        self.assertEqual(saved_count, [event["event_id"]])
+        self.assertCountEqual(saved_count, [paired_event["event_id"], claim_event["event_id"]])
 
     def test_second_feedback_updates_same_archived_room(self):
         room = self.complete_dialogues()

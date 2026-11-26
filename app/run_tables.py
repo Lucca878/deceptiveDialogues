@@ -157,7 +157,8 @@ def insert_raw_events(connection: Connection, run_id: str, events: list[dict[str
             continue
 
         # Convert server ISO timestamps to SQLAlchemy datetime values for the raw table's typed time columns.
-        row = {key: value for key, value in event.items() if key in allowed_columns}
+        # Supply explicit NULLs for absent optional fields so mixed event types batch consistently.
+        row = {key: event.get(key) for key in allowed_columns}
         for key in timestamp_columns:
             timestamp = row.get(key)
             if isinstance(timestamp, str):
