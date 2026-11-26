@@ -316,12 +316,15 @@ def archive_completed_room(
         screening_ids = room_state["screening_submission_ids"]
         room_id = room_state["archive_id"]
         participant_models = {}
+        participant_raw_events = []
 
         with db.session.begin():
             for room_participant_id in (interviewer_room_participant_id, interviewee_room_participant_id):
                 participant_id = participant_ids[room_participant_id]
                 submission_id = screening_ids[room_participant_id]
                 state = study_sessions[participant_id]
+                # Combine both participant buffers so one feedback submit saves the complete active room batch.
+                participant_raw_events.extend(state.get("raw_events", []))
                 screening = screening_submissions[submission_id]
                 participant = db.session.get(Participant, participant_id)
                 if participant is None:
@@ -445,7 +448,7 @@ def archive_completed_room(
             insert_raw_events(
                 db.session.connection(),
                 current_app.config["STUDY_RUN_ID"],
-                room_state.get("raw_events", []),
+                [*participant_raw_events, *room_state.get("raw_events", [])],
             )
         return True
     except (SQLAlchemyError, KeyError, TypeError, ValueError):
@@ -461,6 +464,8 @@ def record_prolific_handoff(
     duration_seconds: float | None,
     page_visits: list[dict],
     room_completed_at: str | None,
+    raw_events: list[dict],
+    run_id: str,
 ) -> bool:
     """Persist final duration, page visit, and shared room completion timestamps."""
     try:
@@ -484,6 +489,8 @@ def record_prolific_handoff(
                 visit.duration_seconds = data.get("duration_seconds")
             if room_completed_at is not None:
                 room.completed_at = room_completed_at
+            # Save the later study-completion event and update any intervals closed after feedback in this transaction.
+            insert_raw_events(db.session.connection(), run_id, raw_events)
         return True
     except (SQLAlchemyError, ValueError):
         db.session.rollback()

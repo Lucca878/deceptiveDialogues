@@ -79,11 +79,97 @@ SCREENING_VERSION = "english-cities-v1"
 TURNSTILE_ACTION = "study-entry"
 TURNSTILE_TIMEOUT_SECONDS = 5
 TURNSTILE_MAX_RESPONSE_BYTES = 16384
+PROLIFIC_ID_QUERY_PARAMETER = "PROLIFIC_PID"
 
 
 def _utc_timestamp():
     """Return a server-generated UTC ISO timestamp for study events."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+
+
+def _new_raw_event(
+    event_type,
+    event_data,
+    *,
+    participant_id=None,
+    room_id=None,
+    room_code=None,
+    dialogue_number=None,
+    turn_number=None,
+    occurred_at=None,
+    started_at=None,
+    ended_at=None,
+    duration_seconds=None,
+):
+    """Build a private raw-event row using only server-owned IDs and timestamps."""
+    return {
+        "event_id": token_hex(16),
+        "participant_id": participant_id,
+        "room_id": room_id,
+        "room_code": room_code,
+        "event_type": event_type,
+        "dialogue_number": dialogue_number,
+        "turn_number": turn_number,
+        "occurred_at": occurred_at,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_seconds": duration_seconds,
+        "event_data": event_data,
+    }
+
+
+def _buffer_participant_event(participant_id, event_type, event_data, **event_fields):
+    """Append one event to the participant's process-memory buffer for save-at-feedback."""
+    event = _new_raw_event(
+        event_type,
+        event_data,
+        participant_id=participant_id,
+        room_id=event_fields.pop("room_id", None),
+        room_code=event_fields.pop("room_code", None),
+        **event_fields,
+    )
+    with rooms_lock:
+        state = study_sessions.setdefault(participant_id, {"page_visits": [], "open_page_visit": None})
+        state.setdefault("raw_events", []).append(event)
+    return event
+
+
+def _buffer_participant_event_once(participant_id, marker, event_type, event_data, **event_fields):
+    """Append a participant milestone once, retaining its event ID in the participant's private state."""
+    event = _new_raw_event(
+        event_type,
+        event_data,
+        participant_id=participant_id,
+        room_id=event_fields.pop("room_id", None),
+        room_code=event_fields.pop("room_code", None),
+        **event_fields,
+    )
+    with rooms_lock:
+        state = study_sessions.setdefault(participant_id, {"page_visits": [], "open_page_visit": None})
+        state.setdefault("raw_events", [])
+        existing_event_id = state.get(marker)
+        if existing_event_id:
+            return _find_buffered_event(state["raw_events"], existing_event_id)
+        state["raw_events"].append(event)
+        state[marker] = event["event_id"]
+    return event
+
+
+def _find_buffered_event(events, event_id):
+    """Return a participant's or room's buffered event by its opaque ID."""
+    return next((event for event in events if event["event_id"] == event_id), None)
+
+
+def _attach_room_to_open_page_visit(participant_state, room_id, room_code):
+    """Fill room context on the active page interval and its raw event after matching."""
+    visit = participant_state.get("open_page_visit")
+    if not visit:
+        return
+    visit["room_id"] = room_id
+    event = _find_buffered_event(participant_state.get("raw_events", []), visit.get("event_id"))
+    if event is not None:
+        event["room_id"] = room_id
+        event["room_code"] = room_code
 
 
 def _ensure_participant_id(started=False):
@@ -113,12 +199,40 @@ def _ensure_participant_id(started=False):
             "screening_complete_version": session.get("travel_screening_complete"),
             "instructions_complete": session.get("instructions_complete") is True,
             "page_visits": [],
+            "raw_events": [],
             "open_page_visit": None,
         })
+        # Older in-process state created before event buffering gets the new collection fields safely.
+        state.setdefault("raw_events", [])
+        state.setdefault("page_visits", [])
         # A session cookie may outlive process memory; restore only its opaque ID and start timestamp.
         if state.get("study_started_at") is None:
             state["study_started_at"] = session.get("study_started_at")
+        if started and state.get("study_started_event_id") is None:
+            # Record study start once even when the Start and consent POSTs are repeated.
+            started_at = state.get("study_started_at") or _utc_timestamp()
+            state["study_started_at"] = started_at
+            start_event = _new_raw_event(
+                "study_started",
+                {},
+                participant_id=participant_id,
+                occurred_at=started_at,
+            )
+            state["raw_events"].append(start_event)
+            state["study_started_event_id"] = start_event["event_id"]
     return participant_id
+
+
+def _capture_prolific_id_from_request():
+    """Retain one valid Prolific ID from the incoming link in server memory only."""
+    submitted_ids = request.args.getlist(PROLIFIC_ID_QUERY_PARAMETER)
+    if len(submitted_ids) != 1 or not submitted_ids[0].strip() or len(submitted_ids[0]) > 128:
+        return
+    participant_id = _ensure_participant_id()
+    with rooms_lock:
+        state = study_sessions.get(participant_id)
+        if state is not None and not state.get("prolific_id"):
+            state["prolific_id"] = submitted_ids[0].strip()
 
 
 def _update_study_session(participant_id, **values):
@@ -142,6 +256,12 @@ def _close_open_page_visit(participant_id, exited_at):
         entered_at = datetime.fromisoformat(visit["entered_at"])
         exit_time = datetime.fromisoformat(exited_at)
         visit["duration_seconds"] = max(0.0, (exit_time - entered_at).total_seconds())
+        # Close the matching raw interval in memory; the database receives it at the agreed later batch save.
+        if visit.get("event_id"):
+            event = _find_buffered_event(state.get("raw_events", []), visit["event_id"])
+            if event is not None:
+                event["ended_at"] = exited_at
+                event["duration_seconds"] = visit["duration_seconds"]
         state["open_page_visit"] = None
 
 
@@ -151,15 +271,33 @@ def _record_page_visit(participant_id, page_name, entered_at):
         state = study_sessions.setdefault(participant_id, {
             "study_started_at": session.get("study_started_at"),
             "page_visits": [],
+            "raw_events": [],
             "open_page_visit": None,
         })
+        # Initialize event storage even when an older state dictionary is restored in tests or development.
+        state.setdefault("raw_events", [])
         previous = state.get("open_page_visit")
         if previous and previous.get("exited_at") is None:
             previous["exited_at"] = entered_at
             entered_time = datetime.fromisoformat(previous["entered_at"])
             exit_time = datetime.fromisoformat(entered_at)
             previous["duration_seconds"] = max(0.0, (exit_time - entered_time).total_seconds())
+            # Update the prior page's raw interval when the next server-observed page begins.
+            if previous.get("event_id"):
+                event = _find_buffered_event(state.get("raw_events", []), previous["event_id"])
+                if event is not None:
+                    event["ended_at"] = entered_at
+                    event["duration_seconds"] = previous["duration_seconds"]
 
+        # Keep verification timing in its dedicated first event rather than creating an earlier raw page event.
+        page_visit_event = None if page_name == "verification" else _new_raw_event(
+            "page_visit",
+            {"page_name": page_name},
+            participant_id=participant_id,
+            room_id=rooms.get(state.get("room_code"), {}).get("archive_id"),
+            room_code=state.get("room_code"),
+            started_at=entered_at,
+        )
         visit = {
             "sequence": len(state["page_visits"]) + 1,
             "page_name": page_name,
@@ -167,8 +305,12 @@ def _record_page_visit(participant_id, page_name, entered_at):
             "entered_at": entered_at,
             "exited_at": None,
             "duration_seconds": None,
+            "event_id": page_visit_event["event_id"] if page_visit_event else None,
         }
         state["page_visits"].append(visit)
+        # Page intervals remain mutable in memory until their exit is server-observed.
+        if page_visit_event is not None:
+            state["raw_events"].append(page_visit_event)
         state["open_page_visit"] = visit
 
 
@@ -208,6 +350,9 @@ def _verification_unavailable(): # Returns a response indicating that human veri
 
 @app.before_request # Ensures that human verification is completed before processing any request.
 def require_human_verification(): # Redirects to human verification if not already verified.
+    # Capture the study link ID before any redirect can discard its query parameters.
+    if request.method == "GET" and not request.path.startswith("/api/") and request.endpoint != "static":
+        _capture_prolific_id_from_request()
     if (
         not app.config["TURNSTILE_ENABLED"]
         or request.endpoint in (None, "static", "verify_human")
@@ -296,9 +441,42 @@ def verify_human(): # Handles the human verification logic for GET and POST requ
                     and result.get("action") == TURNSTILE_ACTION
                     and result.get("hostname") in app.config["TURNSTILE_HOSTNAMES"]
                 ): # Check if verification succeeded and the action and hostname are valid.
+                    # Capture the server-observed verification interval before starting the first raw study event.
+                    participant_id = _ensure_participant_id()
+                    verified_at = _utc_timestamp()
                     session["human_verified"] = True # Mark the session as human-verified.
                     session["human_verification_config"] = _human_verification_fingerprint() # Store the human verification fingerprint in the session.
-                    participant_id = _ensure_participant_id()
+                    # Close verification timing at the successful challenge; that interval lives on this first event.
+                    _close_open_page_visit(participant_id, verified_at)
+                    with rooms_lock:
+                        participant_state = study_sessions[participant_id]
+                        verification_visits = [
+                            {
+                                "started_at": visit["entered_at"],
+                                "ended_at": visit["exited_at"],
+                                "duration_seconds": visit["duration_seconds"],
+                            }
+                            for visit in participant_state.get("page_visits", [])
+                            if visit["page_name"] == "verification"
+                        ]
+                        prolific_id = participant_state.get("prolific_id")
+                    verification_started_at = verification_visits[0]["started_at"] if verification_visits else None
+                    verification_duration = sum(
+                        visit["duration_seconds"] or 0.0 for visit in verification_visits
+                    ) if verification_visits else None
+                    _buffer_participant_event(
+                        participant_id,
+                        "human_verification_completed",
+                        {
+                            "verified": True,
+                            "prolific_id": prolific_id,
+                            "verification_page_visits": verification_visits,
+                        },
+                        occurred_at=verified_at,
+                        started_at=verification_started_at,
+                        ended_at=verified_at,
+                        duration_seconds=verification_duration,
+                    )
                     _update_study_session(participant_id, entry_verified=True)
                     return redirect(url_for("landing")) # Redirect to the landing page after successful verification.
                 error = "Verification was not successful. Please complete a new check and try again." # Set error message for failed verification.
@@ -664,15 +842,36 @@ def complete_study():
             room_completed_at = room.get("completed_at")
             if room_completed_at is None and set(participants_completed_at) >= set(room["participants"]):
                 room_completed_at = redirect_at
-            page_visits = [dict(visit) for visit in state.get("page_visits", [])]
-            if page_visits and page_visits[-1].get("exited_at") is None:
-                final_visit = page_visits[-1]
+            # Close the final page interval in memory at the server-observed handoff request.
+            final_visit = state.get("open_page_visit")
+            if final_visit and final_visit.get("exited_at") is None:
                 final_visit["exited_at"] = redirect_at
                 entered_at = datetime.fromisoformat(final_visit["entered_at"])
                 exited_at = datetime.fromisoformat(redirect_at)
-                final_visit["duration_seconds"] = max(
-                    0.0, (exited_at - entered_at).total_seconds(),
+                final_visit["duration_seconds"] = max(0.0, (exited_at - entered_at).total_seconds())
+                if final_visit.get("event_id"):
+                    raw_visit_event = _find_buffered_event(state.get("raw_events", []), final_visit["event_id"])
+                    if raw_visit_event is not None:
+                        raw_visit_event["ended_at"] = redirect_at
+                        raw_visit_event["duration_seconds"] = final_visit["duration_seconds"]
+                state["open_page_visit"] = None
+            page_visits = [dict(visit) for visit in state.get("page_visits", [])]
+
+            # Buffer the final study interval once; its raw event is committed alongside the handoff timing row.
+            if state.get("study_completed_event_id") is None:
+                completion_event = _new_raw_event(
+                    "study_completed",
+                    {"handoff_initiated": True},
+                    participant_id=participant_id,
+                    room_id=room["archive_id"],
+                    room_code=session.get("room_code"),
+                    occurred_at=redirect_at,
+                    started_at=started_at,
+                    ended_at=redirect_at,
+                    duration_seconds=duration_seconds,
                 )
+                state.setdefault("raw_events", []).append(completion_event)
+                state["study_completed_event_id"] = completion_event["event_id"]
 
             if not record_prolific_handoff(
                 participant_id=participant_id,
@@ -681,6 +880,8 @@ def complete_study():
                 duration_seconds=duration_seconds,
                 page_visits=page_visits,
                 room_completed_at=room_completed_at,
+                raw_events=state.get("raw_events", []),
+                run_id=app.config["STUDY_RUN_ID"],
             ):
                 # Do not send the participant away when the final timestamp could not be saved; they can retry.
                 return "Could not save your completion time. Please try again.", 503
@@ -761,6 +962,16 @@ def submit_feedback():
         }
         # Commit the whole server-owned participant/room snapshot before acknowledging this submission.
         room.setdefault("feedback_submissions", {})[room_participant_id] = feedback_record
+        # Buffer validated feedback with the stable participant identity for the same feedback transaction.
+        feedback_event = _new_raw_event(
+            "feedback_submitted",
+            {key: value for key, value in feedback_record.items() if key != "timestamp"},
+            participant_id=room["participant_ids"][room_participant_id],
+            room_id=room["archive_id"],
+            room_code=room_code,
+            occurred_at=feedback_record["timestamp"],
+        )
+        room.setdefault("raw_events", []).append(feedback_event)
         if not archive_completed_room(
             room_code=room_code,
             room_state=room,
@@ -771,6 +982,10 @@ def submit_feedback():
         ):
             # Keep the response retryable if persistence failed; do not claim that feedback was saved.
             room["feedback_submissions"].pop(room_participant_id, None)
+            room["raw_events"] = [
+                event for event in room.get("raw_events", [])
+                if event["event_id"] != feedback_event["event_id"]
+            ]
             response = app.make_response(render_template(
                 "feedback.html",
                 submitted=False,
@@ -828,6 +1043,14 @@ def consent_decision():
             participant_id,
             consent_accepted=True,
             consent_accepted_at=session["consent_accepted_at"],
+        )
+        # Record the participant's accepted study consent once; declined sessions never reach the feedback batch.
+        _buffer_participant_event_once(
+            participant_id,
+            "consent_decision_event_id",
+            "consent_decided",
+            {"decision": "accept"},
+            occurred_at=session["consent_accepted_at"],
         )
         if _screening_complete() and session.get("travel_screened_out") is not True:
             return redirect(url_for("instructions"))
@@ -913,12 +1136,29 @@ def travel_cities():
                     sampled_not_visited = sample(not_visited_city_ids, 5)
                     combined_sampled = sampled_visited + sampled_not_visited
                     shuffle(combined_sampled)
+                    screening_submitted_at = _utc_timestamp()
                     screening_submissions[submission_id] = {
                         "version": SCREENING_VERSION,
-                        "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                        "timestamp": screening_submitted_at,
                         "answers": answers,
                         "order": combined_sampled,
                     }
+                    # Preserve the eligible screening answers and server-selected claim order in the participant's event buffer.
+                    participant_id = session.get("participant_id", "")
+                    participant_state = study_sessions.get(participant_id)
+                    if participant_state is not None:
+                        participant_state.setdefault("raw_events", []).append(_new_raw_event(
+                            "screening_completed",
+                            {
+                                "submission_id": submission_id,
+                                "screening_version": SCREENING_VERSION,
+                                "answers": answers,
+                                "claim_order": list(combined_sampled),
+                                "eligible": True,
+                            },
+                            participant_id=participant_id,
+                            occurred_at=screening_submitted_at,
+                        ))
                     # Re-screening replaces only this owner's room reference;
                     # no participant's retained record is deleted or overwritten.
                     bound_room, room_participant_id = _bound_room(session.get("room_code", ""))
@@ -957,8 +1197,18 @@ def instructions():
 @consent_required
 @screening_required
 def continue_to_matching():
+    # Create one timestamped event for the participant's explicit instructions continuation.
+    participant_id = session.get("participant_id", "")
+    instructions_completed_at = _utc_timestamp()
     session["instructions_complete"] = True
     _update_study_session(session.get("participant_id"), instructions_complete=True)
+    _buffer_participant_event_once(
+        participant_id,
+        "instructions_completed_event_id",
+        "instructions_completed",
+        {},
+        occurred_at=instructions_completed_at,
+    )
     return redirect(url_for("room"))
 
 
@@ -978,7 +1228,18 @@ def role_instructions():
         if room is None or room["participants"][room_participant_id] is None:
             return redirect(url_for("room"))
         if request.method == "POST":
-            room["ready"].add(room_participant_id)
+            # Record readiness only on the first accepted click; repeated POSTs remain idempotent.
+            if room_participant_id not in room["ready"]:
+                ready_at = _utc_timestamp()
+                room["ready"].add(room_participant_id)
+                room["raw_events"].append(_new_raw_event(
+                    "participant_ready",
+                    {"role": room["participants"][room_participant_id]},
+                    participant_id=room["participant_ids"][room_participant_id],
+                    room_id=room["archive_id"],
+                    room_code=session["room_code"],
+                    occurred_at=ready_at,
+                ))
             return redirect(url_for("role_instructions"))
         if _chat_ready(room):
             # Start the room timeline when both participants are ready to enter the shared chat.
@@ -1042,8 +1303,8 @@ def match_room(): # Handles the API request to match a participant to a room
             study_state = study_sessions.get(participant_id)
             if study_state is not None:
                 study_state.update(room_code=code, room_participant_id=room_participant_id)
-                if study_state.get("open_page_visit"):
-                    study_state["open_page_visit"]["room_id"] = rooms[code]["archive_id"]
+                # Update the page interval event that was open when this participant entered matching.
+                _attach_room_to_open_page_visit(study_state, rooms[code]["archive_id"], code)
             return jsonify(code=code, status="waiting")
 
         token = token_hex(32)
@@ -1065,8 +1326,8 @@ def match_room(): # Handles the API request to match a participant to a room
             )
             if study_state is not None:
                 study_state.update(room_code=code, room_participant_id=paired_room_participant_id)
-                if study_state.get("open_page_visit"):
-                    study_state["open_page_visit"]["room_id"] = rooms[code]["archive_id"]
+                # Attach the shared room identifiers to each participant's currently open page event.
+                _attach_room_to_open_page_visit(study_state, rooms[code]["archive_id"], code)
         # Find the participant who was assigned the interviewer role.
         interviewer_room_participant_id = next(
             room_participant_id for room_participant_id, role in participants.items() if role == "interviewer"
@@ -1195,11 +1456,30 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             # End conversation timing at the server's acceptance of the tenth answer.
             room["current_claim"]["conversation_ended_at"] = message["timestamp"]
             dialogue_started_at = room["current_claim"].get("started_at")
+            dialogue_duration_seconds = 0.0
             if dialogue_started_at:
-                room["current_claim"]["dialogue_duration_seconds"] = max(
+                dialogue_duration_seconds = max(
                     0.0,
                     (datetime.fromisoformat(message["timestamp"]) - datetime.fromisoformat(dialogue_started_at)).total_seconds(),
                 )
+            room["current_claim"]["dialogue_duration_seconds"] = dialogue_duration_seconds
+            # Buffer the completed conversation interval at the server-accepted tenth answer.
+            room["raw_events"].append(_new_raw_event(
+                "dialogue_completed",
+                {
+                    "claim": room["current_claim"]["claim_text"],
+                    "city_id": room["current_claim"]["city_id"],
+                    "ground_truth": room["current_claim"]["truth_status"],
+                    "role": role,
+                },
+                participant_id=room["participant_ids"][room_participant_id],
+                room_id=room["archive_id"],
+                room_code=code.upper(),
+                dialogue_number=room["current_claim"]["dialogue_id"],
+                started_at=dialogue_started_at,
+                ended_at=message["timestamp"],
+                duration_seconds=dialogue_duration_seconds,
+            ))
             # Judgement timing starts at the same boundary and runs through any feedback shown before Continue.
             room["current_claim"]["judgement_started_at"] = message["timestamp"]
         if room["current_claim"].get("question_turns_ended"):
@@ -1313,6 +1593,19 @@ def submit_judgement(code):
             "timestamp": judgement_submitted_at,
         }
         room["current_claim"]["judgement_submitted_at"] = judgement_submitted_at
+        # Buffer the interviewer's judgement using the dialogue's decision interval start.
+        judgement_event = _new_raw_event(
+            "judgement_submitted",
+            {"judgement": judgement, "confidence": confidence, "correct": correct},
+            participant_id=room["participant_ids"][room_participant_id],
+            room_id=room["archive_id"],
+            room_code=code.upper(),
+            dialogue_number=room["current_claim"]["dialogue_id"],
+            occurred_at=judgement_submitted_at,
+            started_at=room["current_claim"].get("judgement_started_at"),
+        )
+        room.setdefault("raw_events", []).append(judgement_event)
+        room["current_claim"]["judgement_event_id"] = judgement_event["event_id"]
         # only when this room's assigned interviewer is in the feedback condition; never expose it to control.
         # Determine if the current interviewer is in the feedback condition
         interviewer_room_participant_id = next(
@@ -1354,12 +1647,30 @@ def continue_claim(code):
         # End judgement timing on the interviewer's Continue click, including any feedback wait.
         judgement_ended_at = _utc_timestamp()
         judgement_started_at = room["current_claim"].get("judgement_started_at")
+        judgement_duration_seconds = 0.0
         if judgement_started_at:
             room["current_claim"]["judgement_ended_at"] = judgement_ended_at
-            room["current_claim"]["judgement_duration_seconds"] = max(
+            judgement_duration_seconds = max(
                 0.0,
                 (datetime.fromisoformat(judgement_ended_at) - datetime.fromisoformat(judgement_started_at)).total_seconds(),
             )
+        room["current_claim"]["judgement_duration_seconds"] = judgement_duration_seconds
+        # Close the buffered judgement interval at the interviewer-controlled Continue boundary.
+        judgement_event_id = room["current_claim"].get("judgement_event_id")
+        judgement_event = _find_buffered_event(room.get("raw_events", []), judgement_event_id)
+        if judgement_event is not None:
+            judgement_event["ended_at"] = judgement_ended_at
+            judgement_event["duration_seconds"] = judgement_duration_seconds
+        # Record the accepted transition separately so dialogue advancement can be reconstructed from raw actions.
+        room.setdefault("raw_events", []).append(_new_raw_event(
+            "dialogue_continued",
+            {},
+            participant_id=room["participant_ids"][room_participant_id],
+            room_id=room["archive_id"],
+            room_code=code.upper(),
+            dialogue_number=room["current_claim"]["dialogue_id"],
+            occurred_at=judgement_ended_at,
+        ))
 
         # Preserve the completed dialogue in the room snapshot before transition advancement clears current_claim.
         current_claim = room["current_claim"]

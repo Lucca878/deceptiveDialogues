@@ -141,10 +141,14 @@ def insert_raw_events(connection: Connection, run_id: str, events: list[dict[str
     if len(set(event_ids)) != len(event_ids):
         raise ValueError("A raw event batch cannot contain duplicate event_id values.")
 
-    # Exclude already persisted event IDs so a second participant's feedback retry cannot duplicate room events.
-    existing_event_ids = set(connection.execute(
-        select(raw_table.c.event_id).where(raw_table.c.event_id.in_(event_ids))
-    ).scalars())
+    # Find existing IDs so retries do not duplicate events and later interval closures can update their rows.
+    existing_rows = {
+        row["event_id"]: row
+        for row in connection.execute(
+            select(raw_table.c.event_id, raw_table.c.ended_at, raw_table.c.duration_seconds)
+            .where(raw_table.c.event_id.in_(event_ids))
+        ).mappings()
+    }
     timestamp_columns = {"occurred_at", "started_at", "ended_at"}
     allowed_columns = {column.name for column in raw_table.columns} - {"study_run_id"}
     rows = []
@@ -153,7 +157,20 @@ def insert_raw_events(connection: Connection, run_id: str, events: list[dict[str
             raise ValueError("Raw events must rely on the table-specific study_run_id default.")
         if not isinstance(event.get("event_type"), str) or not isinstance(event.get("event_data"), dict):
             raise ValueError("Raw events require an event_type and one event_data object.")
-        if event["event_id"] in existing_event_ids:
+        existing = existing_rows.get(event["event_id"])
+        if existing is not None:
+            # Intervals are buffered open at feedback, then closed later by the next page or study-completion request.
+            updates = {}
+            if event.get("ended_at") is not None and existing["ended_at"] is None:
+                updates["ended_at"] = event["ended_at"]
+                if isinstance(updates["ended_at"], str):
+                    updates["ended_at"] = datetime.fromisoformat(updates["ended_at"])
+            if event.get("duration_seconds") is not None and existing["duration_seconds"] is None:
+                updates["duration_seconds"] = event["duration_seconds"]
+            if updates:
+                connection.execute(
+                    raw_table.update().where(raw_table.c.event_id == event["event_id"]).values(**updates)
+                )
             continue
 
         # Convert server ISO timestamps to SQLAlchemy datetime values for the raw table's typed time columns.

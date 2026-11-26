@@ -133,6 +133,33 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(state["page_visits"][0]["exited_at"], "2026-01-01T09:01:00.000+00:00")
         self.assertEqual(state["page_visits"][0]["duration_seconds"], 60.0)
         self.assertIsNone(state["page_visits"][1]["exited_at"])
+        lifecycle_events = state["raw_events"]
+        self.assertEqual(
+            [event["event_type"] for event in lifecycle_events],
+            ["page_visit", "study_started", "page_visit"],
+        )
+        self.assertEqual(lifecycle_events[1]["occurred_at"], "2026-01-01T09:01:00.000+00:00")
+        self.assertEqual(lifecycle_events[0]["ended_at"], "2026-01-01T09:01:00.000+00:00")
+
+    def test_participant_lifecycle_events_are_buffered_until_feedback(self):
+        with self.first.session_transaction() as browser_session:
+            participant_id = browser_session["participant_id"]
+        state = server.study_sessions[participant_id]
+        lifecycle_events = state["raw_events"]
+        self.assertEqual(
+            [event["event_type"] for event in lifecycle_events],
+            ["study_started", "consent_decided", "screening_completed", "instructions_completed"],
+        )
+        screening_event = lifecycle_events[2]
+        self.assertEqual(screening_event["participant_id"], participant_id)
+        self.assertEqual(screening_event["event_data"]["screening_version"], server.SCREENING_VERSION)
+        self.assertEqual(len(screening_event["event_data"]["answers"]), len(server.CANDIDATE_CITIES))
+        self.assertEqual(len(screening_event["event_data"]["claim_order"]), 10)
+
+        # Study lifecycle events remain memory-only until this participant submits final feedback.
+        with server.app.app_context():
+            raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
+            self.assertEqual(db.session.execute(select(raw_table)).mappings().all(), [])
 
     def test_dialogue_and_judgement_durations_include_feedback_until_continue(self):
         room, interviewer, interviewer_id, _, _ = self.prepare_judgement("feedback")
@@ -157,6 +184,17 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(claim["judgement_submitted_at"], judgement_submitted_at)
         self.assertEqual(claim["judgement_ended_at"], continue_clicked_at)
         self.assertEqual(claim["judgement_duration_seconds"], 40.0)
+        judgement_event = next(event for event in room["raw_events"] if event["event_type"] == "judgement_submitted")
+        self.assertEqual(judgement_event["participant_id"], room["participant_ids"][interviewer_id])
+        self.assertEqual(judgement_event["event_data"]["judgement"], "true")
+        self.assertEqual(judgement_event["event_data"]["confidence"], 80)
+        self.assertEqual(judgement_event["started_at"], claim["judgement_started_at"])
+        self.assertEqual(judgement_event["occurred_at"], judgement_submitted_at)
+        self.assertEqual(judgement_event["ended_at"], continue_clicked_at)
+        self.assertEqual(judgement_event["duration_seconds"], 40.0)
+        continuation_event = next(event for event in room["raw_events"] if event["event_type"] == "dialogue_continued")
+        self.assertEqual(continuation_event["dialogue_number"], 1)
+        self.assertEqual(continuation_event["occurred_at"], continue_clicked_at)
 
     def prepare_message_turn(self):
         """Prepare a ready pair with the interviewer allowed to send the first question."""
@@ -415,18 +453,16 @@ class RoleReadinessTests(unittest.TestCase):
         }
         first_feedback = self.first.post("/submit_feedback", data=feedback_data)
         self.assertEqual(first_feedback.status_code, 302)
+        buffered_events = list(room["raw_events"])
+        for participant_id in room["participant_ids"].values():
+            buffered_events.extend(server.study_sessions[participant_id]["raw_events"])
+        expected_event_ids = {event["event_id"] for event in buffered_events}
         with server.app.app_context():
             raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
             saved_events = db.session.execute(select(raw_table)).mappings().all()
-        self.assertEqual(len(saved_events), 5)
+        self.assertEqual(len(saved_events), len(expected_event_ids))
         self.assertTrue(all(saved_event["study_run_id"] == "test" for saved_event in saved_events))
-        self.assertEqual(
-            {saved_event["event_id"] for saved_event in saved_events},
-            {
-                paired_event["event_id"], claim_event["event_id"], question_event["event_id"],
-                category_event["event_id"], answer_event["event_id"],
-            },
-        )
+        self.assertEqual({saved_event["event_id"] for saved_event in saved_events}, expected_event_ids)
         persisted_question_event = next(saved_event for saved_event in saved_events if saved_event["event_id"] == question_event["event_id"])
         self.assertEqual(persisted_question_event["event_data"]["message"], "What did you enjoy?")
         persisted_category_event = next(saved_event for saved_event in saved_events if saved_event["event_id"] == category_event["event_id"])
@@ -441,12 +477,13 @@ class RoleReadinessTests(unittest.TestCase):
         # The second feedback transaction sees the same buffered events but must not insert duplicate rows.
         second_feedback = self.second.post("/submit_feedback", data=feedback_data)
         self.assertEqual(second_feedback.status_code, 302)
+        buffered_events = list(room["raw_events"])
+        for participant_id in room["participant_ids"].values():
+            buffered_events.extend(server.study_sessions[participant_id]["raw_events"])
+        expected_event_ids = {event["event_id"] for event in buffered_events}
         with server.app.app_context():
             saved_count = db.session.execute(select(raw_table.c.event_id)).scalars().all()
-        self.assertCountEqual(saved_count, [
-            paired_event["event_id"], claim_event["event_id"], question_event["event_id"],
-            category_event["event_id"], answer_event["event_id"],
-        ])
+        self.assertCountEqual(saved_count, expected_event_ids)
 
     def test_second_feedback_updates_same_archived_room(self):
         room = self.complete_dialogues()
@@ -469,7 +506,12 @@ class RoleReadinessTests(unittest.TestCase):
             self.assertEqual(len(archived_room.feedback_submissions), 2)
             self.assertEqual(len(archived_room.dialogues), 0)
             self.assertEqual(len(archived_room.messages), len(room["messages"]))
-
+        feedback_events = [event for event in room["raw_events"] if event["event_type"] == "feedback_submitted"]
+        self.assertEqual(len(feedback_events), 2)
+        self.assertEqual(
+            {event["participant_id"] for event in feedback_events},
+            set(room["participant_ids"].values()),
+        )
     def test_feedback_archive_failure_is_retryable_and_does_not_save_partial_data(self):
         room = self.complete_dialogues()
         form_data = {
@@ -619,6 +661,7 @@ class RoleReadinessTests(unittest.TestCase):
                 "entered_at": "2026-01-01T10:01:00.000+00:00",
                 "exited_at": None,
                 "duration_seconds": None,
+                "event_id": f"page-visit-{participant_id}",
             }
             server.study_sessions[participant_id] = {
                 "study_started_at": "2026-01-01T10:00:00.000+00:00",
@@ -633,6 +676,18 @@ class RoleReadinessTests(unittest.TestCase):
                 "room_participant_id": "first" if participant_id == first_participant_id else "second",
                 "page_visits": [visit],
                 "open_page_visit": visit,
+                "raw_events": [{
+                    "event_id": visit["event_id"],
+                    "participant_id": participant_id,
+                    "room_id": room["archive_id"],
+                    "room_code": "ROOM01",
+                    "event_type": "page_visit",
+                    "occurred_at": None,
+                    "started_at": visit["entered_at"],
+                    "ended_at": None,
+                    "duration_seconds": None,
+                    "event_data": {"page_name": "study-ended"},
+                }],
             }
 
         seed_study_state(first_participant_id)
@@ -668,11 +723,17 @@ class RoleReadinessTests(unittest.TestCase):
         first_state = server.study_sessions[first_participant_id]
         self.assertEqual(first_state["prolific_redirect_at"], first_redirect_time)
         self.assertEqual(first_state["duration_seconds"], 120.0)
+        first_completion_events = [event for event in first_state["raw_events"] if event["event_type"] == "study_completed"]
+        self.assertEqual(len(first_completion_events), 1)
+        self.assertEqual(first_completion_events[0]["ended_at"], first_redirect_time)
         self.assertEqual(first_state["page_visits"][0]["exited_at"], first_redirect_time)
         self.assertEqual(first_state["page_visits"][0]["duration_seconds"], 60.0)
         second_state = server.study_sessions[second_participant_id]
         self.assertEqual(second_state["prolific_redirect_at"], second_redirect_time)
         self.assertEqual(second_state["duration_seconds"], 180.0)
+        second_completion_events = [event for event in second_state["raw_events"] if event["event_type"] == "study_completed"]
+        self.assertEqual(len(second_completion_events), 1)
+        self.assertEqual(second_completion_events[0]["ended_at"], second_redirect_time)
         self.assertEqual(room["completed_at"], second_redirect_time)
         self.assertEqual(room["participants_completed_at"]["first"], first_redirect_time)
         self.assertEqual(room["participants_completed_at"]["second"], second_redirect_time)
@@ -686,6 +747,17 @@ class RoleReadinessTests(unittest.TestCase):
             self.assertEqual(second_record.prolific_redirect_at, second_redirect_time)
             self.assertEqual(second_record.duration_seconds, 180.0)
             self.assertEqual(archived_room.completed_at, second_redirect_time)
+            raw_table = Table("raw_test", MetaData(), autoload_with=db.engine)
+            raw_rows = db.session.execute(select(raw_table)).mappings().all()
+            completion_events = [row for row in raw_rows if row["event_type"] == "study_completed"]
+            self.assertCountEqual(
+                [row["participant_id"] for row in completion_events],
+                [first_participant_id, second_participant_id],
+            )
+            saved_visits = {row["event_id"]: row for row in raw_rows if row["event_type"] == "page_visit"}
+            self.assertEqual(saved_visits[f"page-visit-{first_participant_id}"]["ended_at"], datetime.fromisoformat(first_redirect_time).replace(tzinfo=None))
+            self.assertEqual(saved_visits[f"page-visit-{first_participant_id}"]["duration_seconds"], 60.0)
+            self.assertEqual(saved_visits[f"page-visit-{second_participant_id}"]["ended_at"], datetime.fromisoformat(second_redirect_time).replace(tzinfo=None))
             first_final_visit = next(
                 visit for visit in first_record.page_visits if visit.page_name == "study-ended"
             )
@@ -897,6 +969,16 @@ class RoleReadinessTests(unittest.TestCase):
         self.assert_chat_blocked(self.second, "second")
 
         self.second.post("/role-instructions")
+        ready_events = [event for event in server.rooms["ROOM01"]["raw_events"] if event["event_type"] == "participant_ready"]
+        self.assertEqual(len(ready_events), 2)
+        self.assertCountEqual(
+            [event["participant_id"] for event in ready_events],
+            list(server.rooms["ROOM01"]["participant_ids"].values()),
+        )
+        self.assertCountEqual(
+            [event["event_data"]["role"] for event in ready_events],
+            ["interviewer", "interviewee"],
+        )
         for client, pid in ((self.first, "first"), (self.second, "second")):
             early_typing = client.post(
                 "/api/rooms/ROOM01/typing",
@@ -1089,6 +1171,15 @@ class RoleReadinessTests(unittest.TestCase):
 
         self.assertTrue(room["current_claim"]["question_turns_ended"])
         self.assertIsNone(room["next_speaker"])
+        dialogue_completion_events = [event for event in room["raw_events"] if event["event_type"] == "dialogue_completed"]
+        judgement_events = [event for event in room["raw_events"] if event["event_type"] == "judgement_submitted"]
+        continuation_events = [event for event in room["raw_events"] if event["event_type"] == "dialogue_continued"]
+        self.assertEqual(len(dialogue_completion_events), 1)
+        self.assertEqual(judgement_events, [])
+        self.assertEqual(continuation_events, [])
+        self.assertEqual(dialogue_completion_events[0]["dialogue_number"], 1)
+        self.assertEqual(dialogue_completion_events[0]["ended_at"], room["current_claim"]["conversation_ended_at"])
+        self.assertEqual(dialogue_completion_events[0]["duration_seconds"], room["current_claim"]["dialogue_duration_seconds"])
         for client, pid in ((interviewer, interviewer_id), (interviewee, interviewee_id)):
             finished_poll = client.get(f"/api/rooms/ROOM01/messages?room_participant_id={pid}").get_json()
             self.assertEqual(finished_poll["question_number"], 10)

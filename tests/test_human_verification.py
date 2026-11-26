@@ -156,6 +156,26 @@ class HumanVerificationTests(unittest.TestCase):
             with self.client.session_transaction() as browser_session:
                 self.assertEqual(browser_session[key], progress[key])
 
+    def test_first_link_prolific_id_is_saved_only_in_the_first_raw_event(self):
+        self.assertEqual(self.client.get("/?PROLIFIC_PID=prolific-participant-42").location, "/verify-human")
+        self.assertEqual(self.client.get("/verify-human").status_code, 200)
+        self.upstream()
+        self.assertEqual(self.submit().location, "/")
+
+        with self.client.session_transaction() as browser_session:
+            participant_id = browser_session["participant_id"]
+            self.assertNotIn("prolific_id", browser_session)
+        events = server.study_sessions[participant_id]["raw_events"]
+        self.assertEqual(len(events), 1)
+        verification = events[0]
+        self.assertEqual(verification["event_type"], "human_verification_completed")
+        self.assertEqual(verification["participant_id"], participant_id)
+        self.assertEqual(verification["event_data"]["prolific_id"], "prolific-participant-42")
+        self.assertTrue(verification["event_data"]["verified"])
+        self.assertEqual(len(verification["event_data"]["verification_page_visits"]), 1)
+        self.assertIsNotNone(verification["started_at"])
+        self.assertIsNotNone(verification["ended_at"])
+
     def test_verified_session_does_not_repeat_challenge_or_upstream(self):
         self.upstream()
         self.submit()
