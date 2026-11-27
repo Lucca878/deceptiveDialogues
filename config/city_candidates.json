@@ -1,0 +1,22 @@
+[
+  {"id": "liverpool", "name": "Liverpool", "country": "England"},
+  {"id": "bristol", "name": "Bristol", "country": "England"},
+  {"id": "leicester", "name": "Leicester", "country": "England"},
+  {"id": "coventry", "name": "Coventry", "country": "England"},
+  {"id": "wakefield", "name": "Wakefield", "country": "England"},
+  {"id": "nottingham", "name": "Nottingham", "country": "England"},
+  {"id": "newcastle-upon-tyne", "name": "Newcastle upon Tyne", "country": "England"},
+  {"id": "doncaster", "name": "Doncaster", "country": "England"},
+  {"id": "milton-keynes", "name": "Milton Keynes", "country": "England"},
+  {"id": "salford", "name": "Salford", "country": "England"},
+  {"id": "sunderland", "name": "Sunderland", "country": "England"},
+  {"id": "brighton-and-hove", "name": "Brighton and Hove", "country": "England"},
+  {"id": "wolverhampton", "name": "Wolverhampton", "country": "England"},
+  {"id": "kingston-upon-hull", "name": "Kingston upon Hull", "country": "England"},
+  {"id": "plymouth", "name": "Plymouth", "country": "England"},
+  {"id": "derby", "name": "Derby", "country": "England"},
+  {"id": "stoke-on-trent", "name": "Stoke-on-Trent", "country": "England"},
+  {"id": "southampton", "name": "Southampton", "country": "England"},
+  {"id": "peterborough", "name": "Peterborough", "country": "England"},
+  {"id": "westminster", "name": "Westminster", "country": "England"}
+]

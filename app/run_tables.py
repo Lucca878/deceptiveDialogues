@@ -24,6 +24,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import Connection
 
+from city_candidates import CANDIDATE_CITIES, CANDIDATE_CITIES_SOURCE
+
 
 RUN_ID_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 RAW_TABLE_SCHEMA_VERSION = 1
@@ -85,8 +87,9 @@ def initialize_study_run(
     configuration: dict[str, Any],
     protocol_version: str,
     application_revision: str | None = None,
+    replace_existing: bool = False,
 ) -> bool:
-    """Create the run tables and immutable metadata; return True only on first creation."""
+    """Create run tables, optionally replacing both tables and all stored run data."""
     if not isinstance(configuration, dict):
         raise ValueError("Run configuration must be a JSON object.")
     if not isinstance(protocol_version, str) or not protocol_version.strip():
@@ -97,7 +100,8 @@ def initialize_study_run(
     existing_tables = set(inspect(engine).get_table_names()) & expected_tables
     configuration_hash = _configuration_hash(configuration)
 
-    if existing_tables:
+    # Keep existing run data immutable unless the caller explicitly requests a reset.
+    if existing_tables and not replace_existing:
         if existing_tables != expected_tables:
             raise ValueError("Only one run table exists; refusing to modify a partial run initialization.")
         with engine.connect() as connection:
@@ -114,8 +118,12 @@ def initialize_study_run(
             raise ValueError("Run is already initialized with different immutable metadata.")
         return False
 
+    # Replace only this run's known tables in one transaction when a reset was requested.
     with engine.begin() as connection:
+        if existing_tables:
+            metadata.drop_all(connection, tables=[raw_table, run_metadata], checkfirst=True)
         metadata.create_all(connection)
+        # Store a fresh metadata snapshot alongside the newly created raw-event table.
         connection.execute(run_metadata.insert().values(
             study_run_id=run_id,
             created_at=datetime.now(timezone.utc),
@@ -218,6 +226,13 @@ def _load_configuration(path: Path) -> dict[str, Any]:
 
     reject_secret_keys(value)
 
+    # Snapshot the exact ordered cities used by screening and exports into the run metadata.
+    value["candidate_cities_source"] = CANDIDATE_CITIES_SOURCE
+    value["candidate_cities"] = [
+        {"id": city_id, "name": name, "country": country}
+        for city_id, name, country in CANDIDATE_CITIES
+    ]
+
     for field in ("target_n_pairs", "target_n_overall", "target_n_rooms"):
         target = value.get(field)
         if target is not None and (not isinstance(target, int) or isinstance(target, bool) or target < 0):
@@ -257,13 +272,15 @@ def register_run_table_commands(app: Flask) -> None:
     @click.option("--config", "config_path", type=click.Path(path_type=Path, exists=True, dir_okay=False), required=True)
     @click.option("--protocol-version", required=True)
     @click.option("--application-revision", default=None)
+    @click.option("--replace-existing", is_flag=True, help="Delete and recreate both run tables, including all raw events.")
     def init_study_run_command(
         run_id: str,
         config_path: Path,
         protocol_version: str,
         application_revision: str | None,
+        replace_existing: bool,
     ) -> None:
-        """Initialize raw_<run_id> and metadata_<run_id> without replacing existing data."""
+        """Initialize run tables, optionally deleting both tables before recreation."""
         configuration = _load_configuration(config_path)
         # Refuse to initialize a participant run that declares mandatory verification while the app has it disabled.
         if configuration.get("human_verification_required") is True and current_app.config.get("TURNSTILE_ENABLED") is not True:
@@ -275,9 +292,16 @@ def register_run_table_commands(app: Flask) -> None:
                 configuration,
                 protocol_version,
                 application_revision,
+                replace_existing=replace_existing,
             )
         except ValueError as error:
             raise click.ClickException(str(error)) from error
         raw_table, metadata_table = _table_names(run_id)
-        action = "Initialized" if created else "Already initialized"
+        # State whether the caller opted into the destructive replacement mode.
+        if replace_existing:
+            action = "Initialized with replacement enabled"
+        elif created:
+            action = "Initialized"
+        else:
+            action = "Already initialized"
         click.echo(f"{action} {raw_table} and {metadata_table}.")

@@ -86,7 +86,7 @@ CSRF protection, rate limiting, or proof that later messages were written by a p
 Cookies can be copied, and clearing them requires a new check. Existing process-memory
 storage and protocol limitations remain unchanged.
 
-The study flow is landing → consent → travel introduction → one questionnaire at `/travel-cities` → shared explanation at `/instructions` → **Find a partner** → automatic matching at `/room` → private instructions at `/role-instructions` → each selects **I'm ready** → chat at `/dialogue` only when both are ready. England eligibility is handled by Prolific only; the app asks no location question. The questionnaire shows all 20 preset English cities in the fixed order defined in [city_candidates.py](city_candidates.py), with stable slug IDs and England as their country. For every city, participants must answer Yes/No to visiting in the past 3 years and rate familiarity from 1 to 7. The server validates all 40 fields before checking eligibility: at least five Yes and at least five No answers are required (5–15 Yes inclusive). Familiarity does not affect eligibility. Invalid or missing answers return HTTP 400 with valid selections preserved, not a screen-out. The form needs no JavaScript.
+The study flow is landing → consent → travel introduction → one questionnaire at `/travel-cities` → shared explanation at `/instructions` → **Find a partner** → automatic matching at `/room` → private instructions at `/role-instructions` → each selects **I'm ready** → chat at `/dialogue` only when both are ready. England eligibility is handled by Prolific only; the app asks no location question. The questionnaire loads its ordered city list from [config/city_candidates.json](config/city_candidates.json) through [city_candidates.py](city_candidates.py); run metadata snapshots each city's ID, display name, country, and order. The current list has 20 English cities with stable slug IDs. For every city, participants must answer Yes/No to visiting in the past 3 years and rate familiarity from 1 to 7. The server validates all 40 fields before checking eligibility: at least five Yes and at least five No answers are required (5–15 Yes inclusive). Familiarity does not affect eligibility. Invalid or missing answers return HTTP 400 with valid selections preserved, not a screen-out. The form needs no JavaScript.
 
 Eligible questionnaire submissions are retained privately in `screening_submissions`, an in-process dictionary protected by `rooms_lock`. Each opaque, server-generated random submission ID selects a record containing `version`, a server UTC ISO `timestamp`, and `answers`: all 20 canonical city IDs mapped to `visited` (`yes`/`no`) and `familiarity` (integer 1–7). Invalid or ineligible submissions create no eligible record. The signed, readable browser session contains only the opaque `screening_submission_id` reference alongside existing progress/ownership fields, never city answers or the submission timestamp. Each room privately maps its participant IDs to their own submission IDs in `screening_submission_ids`; room APIs, chat responses and partner pages do not expose these references or answers. No claims, truth assignments, export or database persistence are added by this retention step.
 
@@ -106,39 +106,62 @@ For local pair testing, use **two separate browser profiles or private contexts*
 
 ```
 deceptiveDialogues/
-├── app/                    # everything served to the browser
-│   ├── templates/          # HTML pages rendered by Flask
-│   │   ├── verify_human.html
-│   │   ├── landing.html
-│   │   ├── consent.html
-│   │   ├── travel_intro.html
-│   │   ├── travel_cities.html
-│   │   ├── instructions.html
-│   │   ├── role_instructions.html
-│   │   ├── screened_out.html
-│   │   ├── room.html
-│   │   └── dialogue.html
-│   └── static/
-│       ├── css/style.css   # all styling
-│       └── js/             # compiled JavaScript (generated, not committed)
-├── frontend/
-│   └── src/                # TypeScript source
-│       ├── landing.ts
-│       ├── room.ts
-│       ├── role_instructions.ts
-│       └── dialogue.ts
-├── server.py               # Flask routes
-├── city_candidates.py      # fixed 20-city questionnaire order and stable IDs
-├── environment.yml         # Conda Python and Flask dependencies
-├── package.json            # npm scripts and build tools
-├── tsconfig.json           # TypeScript type-checking settings
+├── app/
+│   ├── database.py         # Flask-SQLAlchemy database binding
+│   ├── raw_exports.py      # participant and room exports from raw events
+│   ├── run_tables.py       # run metadata and raw-event table initialization
+│   ├── static/
+│   │   ├── css/style.css
+│   │   ├── fonts/          # bundled font files and license
+│   │   └── js/             # generated JavaScript bundles and source maps
+│   └── templates/          # Flask-rendered pages and shared fragments
+│       ├── participant_materials/
+│       ├── consent.html
+│       ├── debriefing.html
+│       ├── dialogue.html
+│       ├── feedback.html
+│       ├── instructions.html
+│       ├── landing.html
+│       ├── no_consent.html
+│       ├── role_instructions.html
+│       ├── room.html
+│       ├── screened_out.html
+│       ├── study_ended.html
+│       ├── travel_cities.html
+│       ├── travel_intro.html
+│       └── verify_human.html
+├── config/
+│   ├── city_candidates.json # ordered editable city source, copied into run metadata
+│   └── study_test.json      # test-run protocol, targets, and participant materials
+├── deploy/
+│   ├── study2.nginx.conf
+│   └── study2.service
+├── frontend/src/            # TypeScript sources compiled into app/static/js/
+│   ├── dialogue.ts
+│   ├── landing.ts
+│   ├── role_instructions.ts
+│   └── room.ts
+├── tests/                   # screening, matching, verification, export, and run-table tests
+├── .github/agents/          # repository-specific coding agent instructions
+├── city_candidates.py       # validates and loads the shared city list
+├── deploy.sh                # remote deployment script
+├── environment.yml          # Conda environment
+├── form-prefill.md          # participant-form prefill notes
+├── package.json             # npm scripts and frontend build dependencies
+├── package-lock.json        # locked npm dependency versions
+├── requirements.txt         # Python dependencies
+├── server-explanation.md    # backend behavior notes
+├── server.py                # Flask routes and study protocol
+├── tsconfig.json            # TypeScript type-checking settings
 └── README.md
 ```
 
 TypeScript is written in `frontend/src/` and compiled by esbuild into `app/static/js/`.
-Never edit files in `app/static/js/` directly; they are overwritten on every build.
-Flask renders files in `app/templates/`; those templates are not exposed as raw files. Files in
-`app/static/` are served publicly, so do not put secrets or private data there.
+Never edit files in `app/static/js/` directly; they are generated build output and are
+overwritten on every build. Flask renders files in `app/templates/`; those templates are
+not exposed as raw files. Files in `app/static/` are served publicly, so do not put secrets
+or private data there. Edit `config/city_candidates.json` to exchange the questionnaire
+candidates; keep each ID unique and stable when changing only a display name.
 
 ## Scripts
 
@@ -198,9 +221,9 @@ The run-specific tables, initializer, and raw-derived participant/room exports a
 - The first study event is `human_verification_completed`. Human verification is required for every run. The Prolific ID is captured from the incoming link in server memory and included in that event; it is not copied into the signed cookie.
 - Events receive server timestamps when actions occur, stay in server memory during the study, and are batch-written transactionally when feedback is submitted. The completion handoff records final timing afterward. A process restart before feedback still loses the active in-memory study, matching current behavior.
 - `room_paired` records both stable participant IDs, their assigned roles, the assigned `condition`, `room_id`, and generated `room_code`. `dialogue_started` records `started_at`, `dialogue_number`, and the claim, city ID, truth status, and interviewee participant ID. `message_sent` records the stable actor ID, role, message text, dialogue number, and turn number. `question_type_assigned` records the category and its target message `event_id`. `dialogue_completed` and `judgement_submitted` carry intervals needed for their duration columns; `page_visit` intervals produce participant page-duration totals.
-- The metadata table stores the run ID, creation time, schema and protocol versions, application revision, and an immutable configuration snapshot. It records protocol/configuration such as dialogue and question counts, screening version, allowed question types, and the condition-allocation rule; it must not contain secrets or participant-level assignments.
+- The metadata table stores the run ID, creation time, schema and protocol versions, application revision, and an immutable configuration snapshot. The snapshot includes the ordered city candidate IDs, display names, countries, and source path from `config/city_candidates.json`, as well as dialogue/question counts, screening version, allowed question types, and the condition-allocation rule. It must not contain secrets or participant-level assignments.
 - The canonical `export-study` command derives participant and room CSV/JSON files from `raw_<run_id>`, not the legacy tables. The room-wide export remains one row per dialogue, with columns such as `interviewer_message_5`, `question_type_interviewer_message_5`, and `interviewee_message_5`; `dialogue_number` identifies which dialogue that row represents. Output headers use lowercase `snake_case`, including `prolific_id`, `interviewee_participant_id`, and `judgement`. `export-study` is the only export command.
-- Initialize a run with `flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1`. The command validates the run ID, creates `raw_test` and `metadata_test`, and stores the immutable configuration snapshot. Repeating it with matching configuration is safe; it refuses changed metadata or partial schemas.
+- Initialize a run with `flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1`. The command validates the run ID, creates `raw_test` and `metadata_test`, and stores the immutable configuration snapshot, including the actual city list. Repeating it with matching configuration is safe; it refuses changed metadata or partial schemas. The explicit `--replace-existing` option deletes and recreates both tables, including all raw events; the development deployment uses this reset and must not be used once research data needs to be retained.
 - Exports are written directly under `/var/lib/study2/exports/`, with a run ID and timestamp in each filename. The live SQLite database is `/var/lib/study2/study2.sqlite`; table names are inside that database file.
 
 #### Export CSV and JSON files from the VPS
@@ -306,8 +329,11 @@ copy `deploy/study2.service` to `/etc/systemd/system/study2.service`, then run
 After later edits to the environment file, restart the service. The unit labels the run
 `test` and points SQLite to `/var/lib/study2/study2.sqlite`, outside the checkout. The
 deployment script creates the shared database and exports directories and initializes
-`raw_test` and `metadata_test` before restarting.
-This is an intentional fresh start: it removes the old
+`raw_test` and `metadata_test` for the `test` run. This is a development reset: every
+deployment deletes and recreates both tables, including all raw events, then writes a
+fresh metadata snapshot from the current configuration. Do not use this deployment
+behavior once research data must be retained; production collection should initialize
+a fresh run ID instead. This deployment also removes the old
 `/var/lib/study2/test/study2-test.sqlite` database and its SQLite sidecars. Running
 locally without `STUDY_DATABASE_URL` uses ephemeral
 in-memory SQLite; it creates no persistent local database file. The database file is
@@ -322,8 +348,8 @@ sh deploy.sh
 ```
 
 The script connects to the VPS over SSH, pulls the latest changes in `/var/www/study2`,
-installs the updated systemd unit and dependencies, builds the frontend, performs the
-documented fresh-start database reset, initializes the TEST run tables, restarts
+installs the updated systemd unit and dependencies, builds the frontend, initializes
+the TEST run tables with a full development reset, restarts
 `study2.service`, and displays its status.
 It stops if a command fails. SSH access to `root@157.90.127.76` is required;
 enter any SSH password or key passphrase directly in your terminal if prompted.

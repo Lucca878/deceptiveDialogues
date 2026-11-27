@@ -7,6 +7,7 @@ from unittest.mock import patch
 from sqlalchemy import create_engine, inspect, text
 
 from app.run_tables import _load_configuration, initialize_study_run
+from city_candidates import CANDIDATE_CITIES, CANDIDATE_CITIES_SOURCE
 import server
 
 
@@ -84,16 +85,62 @@ class RunTableInitializationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Run ID"):
             initialize_study_run(self.engine, "test;drop_tables", self.configuration, "dialogue_v1")
 
-    def test_participant_materials_and_targets_are_snapshotted(self):
+    def test_explicit_replacement_recreates_both_tables(self):
+        initialize_study_run(self.engine, "test", self.configuration, "dialogue_v1", "old-revision")
+        with self.engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO raw_test (event_id, event_type, event_data) "
+                "VALUES ('old-event', 'message_sent', '{\"message\": \"test\"}')"
+            ))
+
+        # A development reset removes all raw events and stores the new run snapshot.
+        changed_configuration = {**self.configuration, "dialogue_count": 12}
+        replaced = initialize_study_run(
+            self.engine,
+            "test",
+            changed_configuration,
+            "dialogue_v2",
+            "new-revision",
+            replace_existing=True,
+        )
+
+        self.assertTrue(replaced)
+        with self.engine.connect() as connection:
+            raw_event_count = connection.execute(text("SELECT COUNT(*) FROM raw_test")).scalar_one()
+            saved = connection.execute(text(
+                "SELECT protocol_version, application_revision, configuration "
+                "FROM metadata_test WHERE study_run_id = 'test'"
+            )).one()
+        self.assertEqual(raw_event_count, 0)
+        self.assertEqual(saved.protocol_version, "dialogue_v2")
+        self.assertEqual(saved.application_revision, "new-revision")
+        self.assertEqual(json.loads(saved.configuration), changed_configuration)
+
+    def test_participant_materials_targets_and_city_candidates_are_snapshotted(self):
         loaded = _load_configuration(Path("config/study_test.json"))
 
         self.assertEqual(loaded["target_n_pairs"], None)
         self.assertEqual(loaded["target_n_overall"], None)
         self.assertEqual(loaded["target_n_rooms"], None)
+        # Metadata retains the exact ordered city source used by screening and exports.
+        expected_cities = [
+            {"id": city_id, "name": name, "country": country}
+            for city_id, name, country in CANDIDATE_CITIES
+        ]
+        self.assertEqual(loaded["candidate_cities_source"], CANDIDATE_CITIES_SOURCE)
+        self.assertEqual(loaded["candidate_cities"], expected_cities)
         materials = loaded["participant_materials"]
         self.assertEqual(set(materials), {"consent", "general_instructions", "role_instructions", "debriefing"})
         self.assertIn("By clicking", materials["consent"]["text"])
         self.assertIn("The Deception Game", materials["debriefing"]["text"])
+
+        # Persisting the loaded config stores the same candidate snapshot in metadata.
+        initialize_study_run(self.engine, "test", loaded, "dialogue_v1")
+        with self.engine.connect() as connection:
+            saved_configuration = json.loads(connection.execute(text(
+                "SELECT configuration FROM metadata_test WHERE study_run_id = 'test'"
+            )).scalar_one())
+        self.assertEqual(saved_configuration["candidate_cities"], expected_cities)
 
     def test_sample_targets_must_be_non_negative_or_null(self):
         with tempfile.TemporaryDirectory() as directory:

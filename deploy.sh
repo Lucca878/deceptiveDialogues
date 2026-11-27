@@ -27,8 +27,8 @@ rm -f /var/lib/study2/test/study2-test.sqlite /var/lib/study2/test/study2-test.s
 if [ -d /var/lib/study2/test ]; then
 	rmdir /var/lib/study2/test
 fi
-# Initialize the run-specific raw and metadata tables; the command refuses incompatible existing metadata.
-sudo -u www-data env TURNSTILE_ENABLED=true STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1 --application-revision "$(git rev-parse --short HEAD)"
+# Reset both TEST run tables so the current development configuration replaces the old snapshot and raw events.
+sudo -u www-data env TURNSTILE_ENABLED=true STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1 --application-revision "$(git rev-parse --short HEAD)" --replace-existing
 # Keep the newly created SQLite database private and writable by the service account.
 chown www-data:www-data /var/lib/study2/study2.sqlite
 chmod 0640 /var/lib/study2/study2.sqlite
