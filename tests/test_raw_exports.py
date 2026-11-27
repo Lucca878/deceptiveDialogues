@@ -2,6 +2,7 @@ import csv
 import json
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 import unittest
 from datetime import datetime
@@ -11,7 +12,7 @@ from sqlalchemy import create_engine
 
 import server
 from app.database import db
-from app.raw_exports import PARTICIPANT_COLUMNS, ROOM_COLUMNS, export_raw_study
+from app.raw_exports import PARTICIPANT_COLUMNS, ROOM_COLUMNS, export_raw_study, export_run_tables
 from app.run_tables import initialize_study_run, insert_raw_events
 from city_candidates import CANDIDATE_CITIES
 
@@ -203,6 +204,39 @@ class RawEventExportTests(unittest.TestCase):
             with self.assertRaises(Exception):
                 export_raw_study(Path(server.app.static_folder), "test", self.engine)
 
+    def test_run_table_export_writes_private_csv_and_json(self):
+        output_directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, output_directory)
+        with server.app.app_context():
+            counts = export_run_tables(output_directory, "test", self.engine)
+
+        self.assertEqual(counts["metadata_records"], 1)
+        self.assertGreater(counts["raw_events"], 0)
+        raw_csv = output_directory / "raw_test.csv"
+        raw_json = output_directory / "raw_test.json"
+        metadata_csv = output_directory / "metadata_test.csv"
+        metadata_json = output_directory / "metadata_test.json"
+        for path in (raw_csv, raw_json, metadata_csv, metadata_json):
+            self.assertTrue(path.is_file())
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+        with raw_csv.open(encoding="utf-8-sig", newline="") as source:
+            raw_rows = list(csv.DictReader(source))
+        self.assertEqual(len(raw_rows), counts["raw_events"])
+        self.assertIsInstance(json.loads(raw_rows[0]["event_data"]), dict)
+
+        raw_records = json.loads(raw_json.read_text(encoding="utf-8"))
+        self.assertEqual(len(raw_records), counts["raw_events"])
+        self.assertIsInstance(raw_records[0]["event_data"], dict)
+
+        with metadata_csv.open(encoding="utf-8-sig", newline="") as source:
+            metadata_row = next(csv.DictReader(source))
+        self.assertEqual(metadata_row["study_run_id"], "test")
+        self.assertIsInstance(json.loads(metadata_row["configuration"]), dict)
+        metadata_records = json.loads(metadata_json.read_text(encoding="utf-8"))
+        self.assertEqual(len(metadata_records), 1)
+        self.assertIsInstance(metadata_records[0]["configuration"], dict)
+
     def test_export_study_cli_uses_raw_test(self):
         # Exercise the registered production command against the app's selected SQLite engine.
         with patch.dict(server.app.config, TURNSTILE_ENABLED=False, STUDY_RUN_ID="test"), server.app.app_context():
@@ -231,6 +265,16 @@ class RawEventExportTests(unittest.TestCase):
         with participant_csv.open(encoding="utf-8-sig", newline="") as source:
             rows = list(csv.DictReader(source))
         self.assertEqual(rows[0]["participant_id"], "cli-participant")
+
+        table_output_directory = output_directory / "raw-tables"
+        table_result = server.app.test_cli_runner().invoke(args=[
+            "export-study-tables", "--output", str(table_output_directory), "--run-id", "test",
+        ])
+        self.assertEqual(table_result.exit_code, 0, table_result.output)
+        self.assertTrue((table_output_directory / "raw_test.csv").is_file())
+        self.assertTrue((table_output_directory / "raw_test.json").is_file())
+        self.assertTrue((table_output_directory / "metadata_test.csv").is_file())
+        self.assertTrue((table_output_directory / "metadata_test.json").is_file())
 
         # Drop dynamic test-run tables so this CLI integration does not leak state across suites.
         with server.app.app_context(), db.engine.begin() as connection:

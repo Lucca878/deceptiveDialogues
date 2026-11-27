@@ -230,7 +230,7 @@ The run-specific tables, initializer, and raw-derived participant/room exports a
 - Events receive server timestamps when actions occur, stay in server memory during the study, and are batch-written transactionally when feedback is submitted. The completion handoff records final timing afterward. A process restart before feedback still loses the active in-memory study, matching current behavior.
 - `room_paired` records both stable participant IDs, their assigned roles, the assigned `condition`, `room_id`, and generated `room_code`. `dialogue_started` records `started_at`, `dialogue_number`, and the claim, city ID, truth status, and interviewee participant ID. `message_sent` records the stable actor ID, role, message text, dialogue number, and turn number. `question_type_assigned` records the category and its target message `event_id`. `dialogue_completed` and `judgement_submitted` carry intervals needed for their duration columns; `page_visit` intervals produce participant page-duration totals.
 - The metadata table stores the run ID, creation time, schema and protocol versions, application revision, and an immutable configuration snapshot. The snapshot includes the ordered city candidate IDs, display names, countries, and source path from `config/city_candidates.json`; the allocation method and condition names; and the source path and full text of every condition/role instruction variant. It also records dialogue/question counts, screening version and allowed question types, but never secrets or participant-level assignments.
-- The canonical `export-study` command derives participant and room CSV/JSON files from `raw_<run_id>`, not the legacy tables. The room-wide export remains one row per dialogue, with columns such as `interviewer_message_5`, `question_type_interviewer_message_5`, and `interviewee_message_5`; `dialogue_number` identifies which dialogue that row represents. Output headers use lowercase `snake_case`, including `prolific_id`, `interviewee_participant_id`, and `judgement`. `export-study` is the only export command.
+- The canonical `export-study` command derives participant and room CSV/JSON files from `raw_<run_id>`, not the legacy tables. The room-wide export remains one row per dialogue, with columns such as `interviewer_message_5`, `question_type_interviewer_message_5`, and `interviewee_message_5`; `dialogue_number` identifies which dialogue that row represents. Output headers use lowercase `snake_case`, including `prolific_id`, `interviewee_participant_id`, and `judgement`. The separate `export-study-tables` command writes the raw and metadata database tables directly as CSV and JSON.
 - Initialize a run with `flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1`. The command validates the run ID, creates `raw_test` and `metadata_test`, and stores the immutable configuration snapshot, including the actual city list. Repeating it with matching configuration is safe; it refuses changed metadata or partial schemas. The explicit `--replace-existing` option deletes and recreates both tables, including all raw events; the development deployment uses this reset and must not be used once research data needs to be retained.
 - Exports are written directly under `/var/lib/study2/exports/`, with a run ID and timestamp in each filename. The live SQLite database is `/var/lib/study2/study2.sqlite`; table names are inside that database file.
 
@@ -246,41 +246,118 @@ or clearly identified as metadata-only.
 - **Validation and privacy:** Reject unsupported methods or settings at startup, and test that configured behavior is enforced server-side without exposing private condition or participant data.
 - **Reproducibility:** Snapshot effective settings and participant-material text for each run so later configuration edits cannot make existing records ambiguous.
 
-#### Export CSV and JSON files from the VPS
+#### Export participant and room files from the VPS
 
-Run these commands in a terminal on your Mac from any directory. They connect to the VPS, write timestamped TEST-run exports directly into the shared private exports directory, then download its contents to `~/study2-exports/`.
+This section has four separate data products. Keep them in their own Mac folders:
+
+| Product | What it contains | Mac folder |
+| --- | --- | --- |
+| Participant/room exports | Readable CSV/JSON derived from `raw_test`; the recommended analysis files | `~/study2-current-exports/` |
+| Raw/metadata tables | The event rows and run configuration snapshot, exported directly from SQLite | `~/study2-raw-tables/` |
+| Legacy exports | Older preserved bundles from before the shared export directory | `~/study2-legacy-exports/` |
+| SQLite database | The database file itself, not a CSV/JSON export | `~/study2.sqlite` |
+
+All of these files contain private research data. Keep them out of Git and public web
+folders. The commands below run on your Mac; enter any SSH passphrase only in the
+terminal.
+
+##### Download the latest participant/room export set (recommended)
+
+`export-study` reads `raw_test` and writes a new timestamped set on the VPS each time;
+it does not change or clear database rows. Older timestamped sets remain on the VPS.
+The commands below transfer only the newest set and replace older generated files in
+the dedicated Mac folder. They do not download or delete the legacy archive or touch
+the database. The temporary Mac staging folder means existing local exports are kept
+until the new set has downloaded successfully.
+
+1. Generate a fresh timestamped set on the VPS:
 
 ```sh
 ssh root@157.90.127.76 "cd /var/www/study2 && sudo -u www-data env STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server export-study --output /var/lib/study2/exports --run-id test"
-mkdir -p -m 700 "$HOME/study2-exports"
-scp -r "root@157.90.127.76:/var/lib/study2/exports/." "$HOME/study2-exports/"
 ```
 
-Each export creates `participants_test_<timestamp>.csv`, `rooms_test_<timestamp>.csv`, corresponding JSON files, and one flat JSON file per room. These exports contain research data: keep them private, do not commit them to Git, and do not put them in a public web directory. The SSH command may prompt for your server login; enter credentials only in your terminal.
-
-#### Export raw and metadata tables directly (optional)
-
-If you want the raw event table and metadata table directly (instead of derived participant/room exports), run:
+2. Download only that newest set into the dedicated folder on your Mac:
 
 ```sh
-ssh root@157.90.127.76 "sqlite3 -header -csv /var/lib/study2/study2.sqlite 'SELECT * FROM raw_test;'" > "$HOME/raw_test.csv"
-ssh root@157.90.127.76 "sqlite3 -header -csv /var/lib/study2/study2.sqlite 'SELECT * FROM metadata_test;'" > "$HOME/metadata_test.csv"
+set -euo pipefail
+mkdir -p -m 700 "$HOME/study2-current-exports"
+chmod 700 "$HOME/study2-current-exports"
+download_dir=$(mktemp -d "$HOME/study2-export-download.XXXXXX")
+trap 'rm -rf "$download_dir"' EXIT
+
+ssh root@157.90.127.76 'set -euo pipefail
+export_dir=/var/lib/study2/exports
+latest=$(find "$export_dir" -maxdepth 1 -type f -name "participants_test_*.csv" -printf "%f\n" | sort | tail -n 1)
+[ -n "$latest" ]
+stamp=${latest#participants_test_}
+stamp=${stamp%.csv}
+find "$export_dir" -maxdepth 1 -type f -name "*_test_${stamp}.*" -printf "%f\0" | tar -C "$export_dir" --null -T - -czf -' \
+	| tar -xzf - -C "$download_dir"
+
+latest_file=$(find "$download_dir" -type f -name 'participants_test_*.csv' -print -quit)
+if [ -z "$latest_file" ]; then
+	echo "No participant export was received; the existing Mac export folder was left unchanged." >&2
+	exit 1
+fi
+stamp=${latest_file##*participants_test_}
+stamp=${stamp%.csv}
+find "$HOME/study2-current-exports" -type f \( -name 'participants_test_*' -o -name 'rooms_test_*' -o -name 'complete_test_*' -o -name 'room_*_test_*' \) ! -name "*_test_${stamp}.*" -delete
+cp "$download_dir"/* "$HOME/study2-current-exports/"
+open "$HOME/study2-current-exports"
 ```
 
-To target a different run, replace `raw_test` and `metadata_test` with `raw_<run_id>` and `metadata_<run_id>`.
+The destination holds one current timestamped set: participant and room CSV/JSON,
+the combined JSON, and one JSON file per room. Only older files matching these generated
+export names in `study2-current-exports` are removed; unrelated files and all VPS copies
+are left alone. To inspect old VPS-generated sets before considering any manual cleanup,
+list them without deleting anything:
 
-To download the raw SQLite database instead, use this separate command (it does not generate CSV/JSON files):
+```sh
+ssh root@157.90.127.76 "find /var/lib/study2/exports -maxdepth 1 -type f \( -name 'participants_test_*' -o -name 'rooms_test_*' -o -name 'complete_test_*' -o -name 'room_*_test_*' \) -print"
+```
+
+##### Download the preserved legacy exports (optional)
+
+This is a separate archive and is not included in the latest-set download. It is copied
+to its own Mac folder; repeating the command overwrites files with the same names there.
+
+```sh
+mkdir -p -m 700 "$HOME/study2-legacy-exports"
+scp -r "root@157.90.127.76:/var/lib/study2/exports/legacy_test_exports/." "$HOME/study2-legacy-exports/"
+open "$HOME/study2-legacy-exports"
+```
+
+##### Export the raw and metadata tables (optional)
+
+Run the first command to generate four stable-named files in a private folder on the
+VPS. It uses the application's existing database connection, so the VPS does not need
+the `sqlite3` command-line program. The command only reads the tables; rerunning it
+replaces the same files instead of accumulating timestamped copies. Then run the
+remaining commands on your Mac to download those files into their separate folder.
+
+```sh
+set -e
+umask 077
+ssh root@157.90.127.76 "cd /var/www/study2 && sudo -u www-data env STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server export-study-tables --run-id test --output /var/lib/study2/raw-tables"
+mkdir -p -m 700 "$HOME/study2-raw-tables"
+chmod 700 "$HOME/study2-raw-tables"
+scp root@157.90.127.76:/var/lib/study2/raw-tables/raw_test.csv root@157.90.127.76:/var/lib/study2/raw-tables/raw_test.json root@157.90.127.76:/var/lib/study2/raw-tables/metadata_test.csv root@157.90.127.76:/var/lib/study2/raw-tables/metadata_test.json "$HOME/study2-raw-tables/"
+chmod 600 "$HOME/study2-raw-tables/raw_test.csv" "$HOME/study2-raw-tables/raw_test.json" "$HOME/study2-raw-tables/metadata_test.csv" "$HOME/study2-raw-tables/metadata_test.json"
+open "$HOME/study2-raw-tables"
+```
+
+The CSV files contain one table row per record; the JSON files contain arrays of
+column-keyed records. For another run, change `--run-id test` and the four source names
+to that run's `raw_<run_id>` and `metadata_<run_id>` names.
+
+##### Download the SQLite database file (optional)
+
+This copies the database itself; it does not produce CSV/JSON files. If the application
+may be writing while the copy runs, use the export commands above instead of copying the
+live database file.
 
 ```sh
 scp root@157.90.127.76:/var/lib/study2/study2.sqlite "$HOME/study2.sqlite"
-```
-
-If the database may be receiving writes while you copy it, prefer the export steps above so the app creates a consistent set of CSV/JSON files using SQLite's normal database connection.
-
-To open the export folder in finder run:
-
-```sh
-open "$HOME/study2-exports"
 ```
 
 #### Operator checklist
@@ -295,35 +372,20 @@ ssh root@157.90.127.76 "cd /var/www/study2 && sudo -u www-data env TURNSTILE_ENA
 
 2. Verify run tables exist.
 
-```sh
-ssh root@157.90.127.76 "sqlite3 /var/lib/study2/study2.sqlite \"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('raw_test','metadata_test');\""
-```
+The `init-study-run` command in step 1 reports whether both run tables were initialized
+or already matched their saved configuration. It refuses to modify partial or mismatched
+run metadata.
 
-3. Export participant/room CSV+JSON from raw events.
+3. Generate and download the latest participant/room export set using the steps in
+	**Download the latest participant/room export set** above.
 
-```sh
-ssh root@157.90.127.76 "cd /var/www/study2 && sudo -u www-data env STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server export-study --output /var/lib/study2/exports --run-id test"
-```
+4. Download the raw/metadata table files separately if needed, using the commands in
+	**Export the raw and metadata tables** above.
 
-4. Export raw and metadata tables directly (optional).
+5. Run a quick event count sanity check.
 
-```sh
-ssh root@157.90.127.76 "sqlite3 -header -csv /var/lib/study2/study2.sqlite 'SELECT * FROM raw_test;'" > "$HOME/raw_test.csv"
-ssh root@157.90.127.76 "sqlite3 -header -csv /var/lib/study2/study2.sqlite 'SELECT * FROM metadata_test;'" > "$HOME/metadata_test.csv"
-```
-
-5. Download export bundle to your Mac.
-
-```sh
-mkdir -p -m 700 "$HOME/study2-exports"
-scp -r "root@157.90.127.76:/var/lib/study2/exports/." "$HOME/study2-exports/"
-```
-
-6. Run a quick event count sanity check.
-
-```sh
-ssh root@157.90.127.76 "sqlite3 /var/lib/study2/study2.sqlite \"SELECT event_type, COUNT(*) FROM raw_test GROUP BY event_type ORDER BY event_type;\""
-```
+The `export-study` command in step 3 prints the participant, room, and dialogue totals
+for a quick export sanity check.
 
 ## Deployment
 

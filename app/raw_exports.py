@@ -83,6 +83,72 @@ def _raw_table(engine: Engine, run_id: str) -> Table:
         raise click.ClickException(f"Raw event table raw_{run_id} is not initialized.") from error
 
 
+def _metadata_table(engine: Engine, run_id: str) -> Table:
+    """Reflect the selected run's metadata table after validating its suffix."""
+    if not RUN_ID_PATTERN.fullmatch(run_id):
+        raise click.ClickException("Run ID must start with a lowercase letter and contain only lowercase letters, digits, or underscores (max 32 characters).")
+    try:
+        return Table(f"metadata_{run_id}", MetaData(), autoload_with=engine)
+    except Exception as error:
+        raise click.ClickException(f"Metadata table metadata_{run_id} is not initialized.") from error
+
+
+def _read_table_rows(engine: Engine, table: Table) -> tuple[list[str], list[dict[str, Any]]]:
+    """Read a reflected run table and preserve its database column order."""
+    with engine.connect() as connection:
+        rows = connection.execute(select(table)).mappings().all()
+    return [column.name for column in table.columns], [dict(row) for row in rows]
+
+
+def _table_export_value(value: Any) -> Any:
+    """Convert typed database values into portable CSV/JSON values."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+def _write_table_exports(output: Path, table_name: str, columns: list[str], rows: list[dict[str, Any]]) -> None:
+    """Write one table as stable-named, private CSV and JSON files."""
+    csv_path = output / f"{table_name}.csv"
+    with csv_path.open("w", encoding="utf-8-sig", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(columns)
+        for row in rows:
+            writer.writerow([
+                json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list))
+                else _table_export_value(value)
+                for value in (row[column] for column in columns)
+            ])
+    os.chmod(csv_path, 0o600)
+
+    json_rows = [
+        {column: _table_export_value(row[column]) for column in columns}
+        for row in rows
+    ]
+    json_path = output / f"{table_name}.json"
+    json_path.write_text(json.dumps(json_rows, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.chmod(json_path, 0o600)
+
+
+def export_run_tables(output: Path, run_id: str, engine: Engine | None = None) -> dict[str, int]:
+    """Export only raw_<run_id> and metadata_<run_id> as private table files."""
+    output = output.expanduser().resolve()
+    static_root = Path(current_app.static_folder).resolve()
+    if output == static_root or static_root in output.parents:
+        raise click.ClickException("Export output must not be inside the public static directory.")
+    output.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(output, 0o700)
+
+    selected_engine = engine or current_app.extensions["sqlalchemy"].engine
+    raw_table = _raw_table(selected_engine, run_id)
+    metadata_table = _metadata_table(selected_engine, run_id)
+    raw_columns, raw_rows = _read_table_rows(selected_engine, raw_table)
+    metadata_columns, metadata_rows = _read_table_rows(selected_engine, metadata_table)
+    _write_table_exports(output, raw_table.name, raw_columns, raw_rows)
+    _write_table_exports(output, metadata_table.name, metadata_columns, metadata_rows)
+    return {"raw_events": len(raw_rows), "metadata_records": len(metadata_rows)}
+
+
 def _read_events(engine: Engine, run_id: str) -> list[dict[str, Any]]:
     """Load only the selected run's raw events into JSON-compatible mappings."""
     table = _raw_table(engine, run_id)
@@ -443,7 +509,7 @@ def export_raw_study(output: Path, run_id: str, engine: Engine | None = None) ->
 
 
 def register_raw_export_command(app: Flask) -> None:
-    """Register the canonical export command that derives output from the raw run table."""
+    """Register CLI commands for derived participant/room and direct run-table exports."""
     @app.cli.command("export-study")
     @click.option("--output", type=click.Path(path_type=Path), required=True)
     @click.option("--run-id", default=None, help="Defaults to STUDY_RUN_ID.")
@@ -453,4 +519,17 @@ def register_raw_export_command(app: Flask) -> None:
         click.echo(
             f"Exported run_id={selected_run_id} from raw events: {counts['participants']} participants, "
             f"{counts['rooms']} rooms, {counts['dialogues']} dialogues to {output.resolve()}"
+        )
+
+    @app.cli.command("export-study-tables")
+    @click.option("--output", type=click.Path(path_type=Path), required=True)
+    @click.option("--run-id", default=None, help="Defaults to STUDY_RUN_ID.")
+    def export_study_tables_command(output: Path, run_id: str | None) -> None:
+        """Write the selected raw and metadata database tables as CSV and JSON."""
+        selected_run_id = run_id or current_app.config["STUDY_RUN_ID"]
+        counts = export_run_tables(output, selected_run_id)
+        click.echo(
+            f"Exported raw_{selected_run_id}: {counts['raw_events']} event rows; "
+            f"metadata_{selected_run_id}: {counts['metadata_records']} metadata records "
+            f"as CSV/JSON to {output.resolve()}"
         )
