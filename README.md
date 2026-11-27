@@ -183,7 +183,7 @@ Flask serves the study pages and temporarily holds active screening submissions,
 
 ## Data collection
 
-The TEST archive stores participant, room, screening, message, dialogue, page-visit, judgement, feedback, and server-side timing records. Active room state is still process-memory only, so a restart clears ongoing sessions; submitted records remain in the configured database. A room is archived when a participant submits feedback. The export command reads the configured database and creates separate CSV/JSON files; downloading the SQLite database file alone does **not** create those exports.
+The active collection stores run-specific raw event and metadata records in the configured database (`raw_<run_id>` and `metadata_<run_id>`). Active room state is still process-memory only, so a restart clears ongoing sessions; submitted records remain in the configured database. The export command reads raw events and creates separate participant/room CSV/JSON files; downloading the SQLite database file alone does **not** create those exports.
 
 ### Target raw-event design
 
@@ -213,7 +213,18 @@ mkdir -p -m 700 "$HOME/study2-exports"
 scp -r "root@157.90.127.76:/var/lib/study2/exports/." "$HOME/study2-exports/"
 ```
 
-Each export creates `participants_test_<timestamp>.csv`, `rooms_test_<timestamp>.csv`, corresponding JSON files, and one flat JSON file per room. Existing legacy export bundles, if present during deployment, are retained under `legacy_test_exports/`. These exports contain research data: keep them private, do not commit them to Git, and do not put them in a public web directory. The SSH command may prompt for your server login; enter credentials only in your terminal.
+Each export creates `participants_test_<timestamp>.csv`, `rooms_test_<timestamp>.csv`, corresponding JSON files, and one flat JSON file per room. These exports contain research data: keep them private, do not commit them to Git, and do not put them in a public web directory. The SSH command may prompt for your server login; enter credentials only in your terminal.
+
+#### Export raw and metadata tables directly (optional)
+
+If you want the raw event table and metadata table directly (instead of derived participant/room exports), run:
+
+```sh
+ssh root@157.90.127.76 "sqlite3 -header -csv /var/lib/study2/study2.sqlite 'SELECT * FROM raw_test;'" > "$HOME/raw_test.csv"
+ssh root@157.90.127.76 "sqlite3 -header -csv /var/lib/study2/study2.sqlite 'SELECT * FROM metadata_test;'" > "$HOME/metadata_test.csv"
+```
+
+To target a different run, replace `raw_test` and `metadata_test` with `raw_<run_id>` and `metadata_<run_id>`.
 
 To download the raw SQLite database instead, use this separate command (it does not generate CSV/JSON files):
 
@@ -227,6 +238,48 @@ To open the export folder in finder run:
 
 ```sh
 open "$HOME/study2-exports"
+```
+
+#### Operator checklist
+
+Use this runbook for routine collection/export operations.
+
+1. Initialize run tables (once per run ID).
+
+```sh
+ssh root@157.90.127.76 "cd /var/www/study2 && sudo -u www-data env TURNSTILE_ENABLED=true STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1"
+```
+
+2. Verify run tables exist.
+
+```sh
+ssh root@157.90.127.76 "sqlite3 /var/lib/study2/study2.sqlite \"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('raw_test','metadata_test');\""
+```
+
+3. Export participant/room CSV+JSON from raw events.
+
+```sh
+ssh root@157.90.127.76 "cd /var/www/study2 && sudo -u www-data env STUDY_RUN_ID=test STUDY_DATABASE_URL=sqlite:////var/lib/study2/study2.sqlite .venv/bin/flask --app server export-study --output /var/lib/study2/exports --run-id test"
+```
+
+4. Export raw and metadata tables directly (optional).
+
+```sh
+ssh root@157.90.127.76 "sqlite3 -header -csv /var/lib/study2/study2.sqlite 'SELECT * FROM raw_test;'" > "$HOME/raw_test.csv"
+ssh root@157.90.127.76 "sqlite3 -header -csv /var/lib/study2/study2.sqlite 'SELECT * FROM metadata_test;'" > "$HOME/metadata_test.csv"
+```
+
+5. Download export bundle to your Mac.
+
+```sh
+mkdir -p -m 700 "$HOME/study2-exports"
+scp -r "root@157.90.127.76:/var/lib/study2/exports/." "$HOME/study2-exports/"
+```
+
+6. Run a quick event count sanity check.
+
+```sh
+ssh root@157.90.127.76 "sqlite3 /var/lib/study2/study2.sqlite \"SELECT event_type, COUNT(*) FROM raw_test GROUP BY event_type ORDER BY event_type;\""
 ```
 
 ## Deployment
@@ -252,13 +305,11 @@ copy `deploy/study2.service` to `/etc/systemd/system/study2.service`, then run
 `systemctl status study2.service --no-pager` without dumping environment secrets.
 After later edits to the environment file, restart the service. The unit labels the run
 `test` and points SQLite to `/var/lib/study2/study2.sqlite`, outside the checkout. The
-deployment script creates the shared database and exports directories, runs
-initializes `raw_test` and `metadata_test` before restarting.
+deployment script creates the shared database and exports directories and initializes
+`raw_test` and `metadata_test` before restarting.
 This is an intentional fresh start: it removes the old
-`/var/lib/study2/test/study2-test.sqlite` database and its SQLite sidecars. Any old
-export bundles are moved to `/var/lib/study2/exports/legacy_test_exports/`; the script
-removes the old `test` directory only if it is empty, failing rather than recursively
-deleting unexpected files. Running locally without `STUDY_DATABASE_URL` uses ephemeral
+`/var/lib/study2/test/study2-test.sqlite` database and its SQLite sidecars. Running
+locally without `STUDY_DATABASE_URL` uses ephemeral
 in-memory SQLite; it creates no persistent local database file. The database file is
 runtime data and is not committed. The database contains only run-specific raw event and metadata tables. Feedback and handoff
 recording is implemented. No production keys or configuration are supplied by this repo.

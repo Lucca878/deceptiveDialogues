@@ -9,8 +9,7 @@
 <body>
   <main class="travel-page">
     <section class="travel-card travel-intro" aria-labelledby="instructions-title">
-      <h1 id="instructions-title">Instructions</h1>
-      <p class="travel-lead">In the next part of this study, you will be matched with another human participant for a text conversation. After you have been paired, you will receive instructions for your assigned role.</p>
+      {% include "participant_materials/general_instructions.html" %}
       <form method="post" action="{{ url_for('continue_to_matching') }}">
         <button class="button travel-primary" type="submit">Find a partner</button>
       </form>

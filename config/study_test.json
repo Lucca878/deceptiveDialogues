@@ -13,5 +13,14 @@
     "method": "equal_random_choice",
     "conditions": ["feedback", "control"]
   },
-  "human_verification_required": true
+  "human_verification_required": true,
+  "target_n_pairs": null,
+  "target_n_overall": null,
+  "target_n_rooms": null,
+  "participant_materials": {
+    "consent": "app/templates/participant_materials/consent.html",
+    "general_instructions": "app/templates/participant_materials/general_instructions.html",
+    "role_instructions": "app/templates/participant_materials/role_instructions.html",
+    "debriefing": "app/templates/participant_materials/debriefing.html"
+  }
 }

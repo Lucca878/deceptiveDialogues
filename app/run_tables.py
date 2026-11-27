@@ -217,10 +217,36 @@ def _load_configuration(path: Path) -> dict[str, Any]:
                 reject_secret_keys(child, f"{location}[{index}]")
 
     reject_secret_keys(value)
-    try:
-        json.dumps(value, allow_nan=False)
-    except (TypeError, ValueError) as error:
-        raise click.ClickException(f"Run configuration must contain JSON-compatible values: {error}") from error
+
+    for field in ("target_n_pairs", "target_n_overall", "target_n_rooms"):
+        target = value.get(field)
+        if target is not None and (not isinstance(target, int) or isinstance(target, bool) or target < 0):
+            raise click.ClickException(f"{field} must be a non-negative integer or null.")
+
+    participant_materials = value.get("participant_materials")
+    if participant_materials is not None:
+        if not isinstance(participant_materials, dict):
+            raise click.ClickException("participant_materials must be a JSON object.")
+        workspace_root = path.resolve().parent.parent
+        snapshots = {}
+        for material_name in ("consent", "general_instructions", "role_instructions", "debriefing"):
+            material_path = participant_materials.get(material_name)
+            if not isinstance(material_path, str) or not material_path.strip():
+                raise click.ClickException(f"participant_materials.{material_name} must be a file path.")
+            source_path = Path(material_path)
+            if not source_path.is_absolute():
+                source_path = workspace_root / source_path
+            try:
+                text_snapshot = source_path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as error:
+                raise click.ClickException(f"Could not read participant material {material_name}: {error}") from error
+            if not text_snapshot:
+                raise click.ClickException(f"Participant material {material_name} is empty.")
+            snapshots[material_name] = {
+                "source": str(source_path.relative_to(workspace_root)) if source_path.is_relative_to(workspace_root) else str(source_path),
+                "text": text_snapshot,
+            }
+        value["participant_materials"] = snapshots
     return value
 
 

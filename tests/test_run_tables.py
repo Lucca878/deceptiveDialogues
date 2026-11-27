@@ -1,9 +1,12 @@
+import json
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from sqlalchemy import create_engine, inspect, text
 
-from app.run_tables import initialize_study_run
+from app.run_tables import _load_configuration, initialize_study_run
 import server
 
 
@@ -15,6 +18,9 @@ class RunTableInitializationTests(unittest.TestCase):
             "dialogue_count": 10,
             "questions_per_dialogue": 10,
             "human_verification_required": True,
+            "target_n_pairs": 50,
+            "target_n_overall": 100,
+            "target_n_rooms": 50,
         }
 
     def tearDown(self):
@@ -77,6 +83,27 @@ class RunTableInitializationTests(unittest.TestCase):
             initialize_study_run(self.engine, "test", changed_configuration, "dialogue_v1")
         with self.assertRaisesRegex(ValueError, "Run ID"):
             initialize_study_run(self.engine, "test;drop_tables", self.configuration, "dialogue_v1")
+
+    def test_participant_materials_and_targets_are_snapshotted(self):
+        loaded = _load_configuration(Path("config/study_test.json"))
+
+        self.assertEqual(loaded["target_n_pairs"], None)
+        self.assertEqual(loaded["target_n_overall"], None)
+        self.assertEqual(loaded["target_n_rooms"], None)
+        materials = loaded["participant_materials"]
+        self.assertEqual(set(materials), {"consent", "general_instructions", "role_instructions", "debriefing"})
+        self.assertIn("By clicking", materials["consent"]["text"])
+        self.assertIn("The Deception Game", materials["debriefing"]["text"])
+
+    def test_sample_targets_must_be_non_negative_or_null(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "study.json"
+            config_path.write_text(json.dumps({
+                **self.configuration,
+                "target_n_pairs": -1,
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(Exception, "target_n_pairs"):
+                _load_configuration(config_path)
 
     def test_partial_run_schema_is_not_silently_repaired(self):
         with self.engine.begin() as connection:
