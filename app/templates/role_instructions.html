@@ -19,7 +19,8 @@
       </div>
       <p class="travel-lead" id="readiness-status" role="status" aria-live="polite">Please keep this page open while you are waiting.</p>
       {% else %}
-      {% include "participant_materials/role_instructions.html" %}
+      {# The server selects one validated role-and-condition HTML snapshot; no condition label reaches this template. #}
+      {{ role_instruction_html }}
       <p class="travel-supporting">You will complete <strong>10 conversations with the same partner</strong>. Select “I'm ready” when you have read these instructions. The dialogue will open once you are both ready.</p>
       <form class="role-instructions-actions" method="post" action="{{ url_for('role_instructions') }}">
         <button class="button travel-primary" type="submit">I'm ready</button>

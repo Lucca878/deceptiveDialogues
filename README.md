@@ -96,7 +96,7 @@ The shared explanation says: “In the next part of this study, you will be matc
 
 On entering `/room`, participants are automatically paired in arrival order using 20 fixed internal codes (`ROOM01`–`ROOM20`), with capacity for 40 participants. No code entry or sharing is needed. The first arrival waits; the next joins the same room and the server randomly assigns interviewer/interviewee roles. Successful matching binds the participant ID and room to the signed Flask session using a private ownership token also held in room memory. Returning requests from that session reuse the assignment; another session cannot claim it by posting the same ID, and a bound session cannot switch to a different participant ID. At full capacity, new arrivals see an all-rooms-occupied message. Rooms are not recycled, and abandoned waiting participants are not removed automatically yet.
 
-Once paired, each browser opens `/role-instructions`. The server chooses the role from the session-bound room membership, never from browser storage or a role query parameter. Only the assigned placeholder is rendered: “Interviewer instructions will be added here.” or “Interviewee instructions will be added here.” The other role's text is not included in the HTML or status JSON. These placeholders must be replaced with approved content before participant collection.
+Once paired, each browser opens `/role-instructions`. The server chooses both role and condition from server-side room state; the browser cannot select either. The editable condition map in [config/study_test.json](config/study_test.json) defines the assignment method and a separate instruction source for each role in each condition. The four sources are [feedback interviewer instructions](app/templates/participant_materials/role_instructions/interviewer_feedback.html), [control interviewer instructions](app/templates/participant_materials/role_instructions/interviewer_control.html), [feedback interviewee instructions](app/templates/participant_materials/role_instructions/interviewee_feedback.html), and [control interviewee instructions](app/templates/participant_materials/role_instructions/interviewee_control.html). They currently preserve the same wording by role; the four files can be edited independently when condition-specific text is approved. The server renders only the assigned participant's selected source and never includes the condition label in page data, session state, or room-status responses. The configured method currently supports `equal_random_choice`; add other allocation methods in code and tests before using them in configuration.
 
 **I'm ready** posts to `/role-instructions`; the server records that participant in the room's readiness set under the room lock. Repeated POSTs, refreshes and matching retries do not reset readiness. Until both participants are ready, the ready participant sees only “Waiting for your partner. Please keep this page open.” The page polls the existing `GET /api/rooms/<code>` endpoint, whose `chat_ready` boolean reports whether chat is available; it exposes no partner ID, instruction content or individual readiness flag. Existing `waiting`/`paired` matching semantics remain unchanged. Direct dialogue requests go to matching before pairing, or role instructions before both are ready. Message send/retrieve and typing APIs require both readiness and session-bound membership, returning JSON HTTP 403 otherwise; room-status polling remains available before readiness. Message timestamps remain private, server-generated UTC values.
 
@@ -116,6 +116,14 @@ deceptiveDialogues/
 │   │   └── js/             # generated JavaScript bundles and source maps
 │   └── templates/          # Flask-rendered pages and shared fragments
 │       ├── participant_materials/
+│       │   ├── consent.html
+│       │   ├── debriefing.html
+│       │   ├── general_instructions.html
+│       │   └── role_instructions/
+│       │       ├── interviewer_feedback.html
+│       │       ├── interviewer_control.html
+│       │       ├── interviewee_feedback.html
+│       │       └── interviewee_control.html
 │       ├── consent.html
 │       ├── debriefing.html
 │       ├── dialogue.html
@@ -221,7 +229,7 @@ The run-specific tables, initializer, and raw-derived participant/room exports a
 - The first study event is `human_verification_completed`. Human verification is required for every run. The Prolific ID is captured from the incoming link in server memory and included in that event; it is not copied into the signed cookie.
 - Events receive server timestamps when actions occur, stay in server memory during the study, and are batch-written transactionally when feedback is submitted. The completion handoff records final timing afterward. A process restart before feedback still loses the active in-memory study, matching current behavior.
 - `room_paired` records both stable participant IDs, their assigned roles, the assigned `condition`, `room_id`, and generated `room_code`. `dialogue_started` records `started_at`, `dialogue_number`, and the claim, city ID, truth status, and interviewee participant ID. `message_sent` records the stable actor ID, role, message text, dialogue number, and turn number. `question_type_assigned` records the category and its target message `event_id`. `dialogue_completed` and `judgement_submitted` carry intervals needed for their duration columns; `page_visit` intervals produce participant page-duration totals.
-- The metadata table stores the run ID, creation time, schema and protocol versions, application revision, and an immutable configuration snapshot. The snapshot includes the ordered city candidate IDs, display names, countries, and source path from `config/city_candidates.json`, as well as dialogue/question counts, screening version, allowed question types, and the condition-allocation rule. It must not contain secrets or participant-level assignments.
+- The metadata table stores the run ID, creation time, schema and protocol versions, application revision, and an immutable configuration snapshot. The snapshot includes the ordered city candidate IDs, display names, countries, and source path from `config/city_candidates.json`; the allocation method and condition names; and the source path and full text of every condition/role instruction variant. It also records dialogue/question counts, screening version and allowed question types, but never secrets or participant-level assignments.
 - The canonical `export-study` command derives participant and room CSV/JSON files from `raw_<run_id>`, not the legacy tables. The room-wide export remains one row per dialogue, with columns such as `interviewer_message_5`, `question_type_interviewer_message_5`, and `interviewee_message_5`; `dialogue_number` identifies which dialogue that row represents. Output headers use lowercase `snake_case`, including `prolific_id`, `interviewee_participant_id`, and `judgement`. `export-study` is the only export command.
 - Initialize a run with `flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1`. The command validates the run ID, creates `raw_test` and `metadata_test`, and stores the immutable configuration snapshot, including the actual city list. Repeating it with matching configuration is safe; it refuses changed metadata or partial schemas. The explicit `--replace-existing` option deletes and recreates both tables, including all raw events; the development deployment uses this reset and must not be used once research data needs to be retained.
 - Exports are written directly under `/var/lib/study2/exports/`, with a run ID and timestamp in each filename. The live SQLite database is `/var/lib/study2/study2.sqlite`; table names are inside that database file.
@@ -328,7 +336,9 @@ copy `deploy/study2.service` to `/etc/systemd/system/study2.service`, then run
 `systemctl status study2.service --no-pager` without dumping environment secrets.
 After later edits to the environment file, restart the service. The unit labels the run
 `test` and points SQLite to `/var/lib/study2/study2.sqlite`, outside the checkout. The
-deployment script creates the shared database and exports directories and initializes
+unit sets `STUDY_CONFIG_PATH` to `/var/www/study2/config/study_test.json`; this is the
+same file passed to `init-study-run` so runtime behavior matches the metadata snapshot.
+The deployment script creates the shared database and exports directories and initializes
 `raw_test` and `metadata_test` for the `test` run. This is a development reset: every
 deployment deletes and recreates both tables, including all raw events, then writes a
 fresh metadata snapshot from the current configuration. Do not use this deployment

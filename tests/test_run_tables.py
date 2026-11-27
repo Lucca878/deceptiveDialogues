@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from sqlalchemy import create_engine, inspect, text
 
-from app.run_tables import _load_configuration, initialize_study_run
+from app.run_tables import load_study_configuration, initialize_study_run
 from city_candidates import CANDIDATE_CITIES, CANDIDATE_CITIES_SOURCE
 import server
 
@@ -117,7 +117,7 @@ class RunTableInitializationTests(unittest.TestCase):
         self.assertEqual(json.loads(saved.configuration), changed_configuration)
 
     def test_participant_materials_targets_and_city_candidates_are_snapshotted(self):
-        loaded = _load_configuration(Path("config/study_test.json"))
+        loaded = load_study_configuration(Path("config/study_test.json"))
 
         self.assertEqual(loaded["target_n_pairs"], None)
         self.assertEqual(loaded["target_n_overall"], None)
@@ -130,9 +130,18 @@ class RunTableInitializationTests(unittest.TestCase):
         self.assertEqual(loaded["candidate_cities_source"], CANDIDATE_CITIES_SOURCE)
         self.assertEqual(loaded["candidate_cities"], expected_cities)
         materials = loaded["participant_materials"]
-        self.assertEqual(set(materials), {"consent", "general_instructions", "role_instructions", "debriefing"})
+        self.assertEqual(set(materials), {"consent", "general_instructions", "debriefing"})
         self.assertIn("By clicking", materials["consent"]["text"])
         self.assertIn("The Deception Game", materials["debriefing"]["text"])
+
+        # Every condition has separate editable sources for both assigned roles.
+        conditions = loaded["condition_allocation"]["conditions"]
+        self.assertEqual(set(conditions), {"feedback", "control"})
+        for condition in conditions.values():
+            self.assertEqual(set(condition["role_instructions"]), {"interviewer", "interviewee"})
+            for instruction in condition["role_instructions"].values():
+                self.assertTrue(instruction["source"].startswith("app/templates/participant_materials/role_instructions/"))
+                self.assertTrue(instruction["text"])
 
         # Persisting the loaded config stores the same candidate snapshot in metadata.
         initialize_study_run(self.engine, "test", loaded, "dialogue_v1")
@@ -141,6 +150,7 @@ class RunTableInitializationTests(unittest.TestCase):
                 "SELECT configuration FROM metadata_test WHERE study_run_id = 'test'"
             )).scalar_one())
         self.assertEqual(saved_configuration["candidate_cities"], expected_cities)
+        self.assertEqual(saved_configuration["condition_allocation"], loaded["condition_allocation"])
 
     def test_sample_targets_must_be_non_negative_or_null(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -150,7 +160,7 @@ class RunTableInitializationTests(unittest.TestCase):
                 "target_n_pairs": -1,
             }), encoding="utf-8")
             with self.assertRaisesRegex(Exception, "target_n_pairs"):
-                _load_configuration(config_path)
+                load_study_configuration(config_path)
 
     def test_partial_run_schema_is_not_silently_repaired(self):
         with self.engine.begin() as connection:

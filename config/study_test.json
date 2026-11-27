@@ -11,7 +11,20 @@
   ],
   "condition_allocation": {
     "method": "equal_random_choice",
-    "conditions": ["feedback", "control"]
+    "conditions": {
+      "feedback": {
+        "role_instructions": {
+          "interviewer": "app/templates/participant_materials/role_instructions/interviewer_feedback.html",
+          "interviewee": "app/templates/participant_materials/role_instructions/interviewee_feedback.html"
+        }
+      },
+      "control": {
+        "role_instructions": {
+          "interviewer": "app/templates/participant_materials/role_instructions/interviewer_control.html",
+          "interviewee": "app/templates/participant_materials/role_instructions/interviewee_control.html"
+        }
+      }
+    }
   },
   "human_verification_required": true,
   "target_n_pairs": null,
@@ -20,7 +33,6 @@
   "participant_materials": {
     "consent": "app/templates/participant_materials/consent.html",
     "general_instructions": "app/templates/participant_materials/general_instructions.html",
-    "role_instructions": "app/templates/participant_materials/role_instructions.html",
     "debriefing": "app/templates/participant_materials/debriefing.html"
   }
 }

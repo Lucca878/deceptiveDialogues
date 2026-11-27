@@ -12,12 +12,14 @@ from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from random import sample, shuffle
+from pathlib import Path
 
 from flask import Flask, jsonify, redirect, render_template, request, session, url_for
+from markupsafe import Markup
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import db
-from app.run_tables import persist_raw_events, register_run_table_commands
+from app.run_tables import load_study_configuration, persist_raw_events, register_run_table_commands
 from app.raw_exports import register_raw_export_command
 from city_candidates import CANDIDATE_CITIES
 
@@ -35,6 +37,12 @@ app.config.update(
     SQLALCHEMY_DATABASE_URI=environ.get("STUDY_DATABASE_URL", "sqlite:///:memory:"),
     SQLALCHEMY_TRACK_MODIFICATIONS=False,
 )
+# Load one validated configuration for both runtime behavior and the metadata initializer.
+STUDY_CONFIG_PATH = Path(environ.get(
+    "STUDY_CONFIG_PATH",
+    Path(__file__).resolve().parent / "config" / "study_test.json",
+))
+STUDY_CONFIGURATION = load_study_configuration(STUDY_CONFIG_PATH)
 # Bind Flask-SQLAlchemy after configuring the app; run tables are created explicitly during deployment and tests.
 db.init_app(app)
 register_run_table_commands(app)
@@ -1238,9 +1246,22 @@ def role_instructions():
             # Start the room timeline when both participants are ready to enter the shared chat.
             room.setdefault("chat_started_at", _utc_timestamp())
             return redirect(url_for("dialogue"))
+        # Resolve the interviewer-held condition on the server and select this participant's role variant.
+        interviewer_room_participant_id = next(
+            participant_id
+            for participant_id, participant_role in room["participants"].items()
+            if participant_role == "interviewer"
+        )
+        condition = room["conditions"][interviewer_room_participant_id]
+        role_instruction = STUDY_CONFIGURATION[
+            "condition_allocation"
+        ]["conditions"][condition]["role_instructions"][room["participants"][room_participant_id]]
+        # Mark only repository-managed instruction HTML as safe; participant input never enters this value.
+        role_instruction_html = Markup(role_instruction["text"])
         response = app.make_response(render_template(
             "role_instructions.html",
             role=room["participants"][room_participant_id],
+            role_instruction_html=role_instruction_html,
             ready=room_participant_id in room["ready"],
             code=session["room_code"],
         ))
@@ -1325,8 +1346,9 @@ def match_room(): # Handles the API request to match a participant to a room
         interviewer_room_participant_id = next(
             room_participant_id for room_participant_id, role in participants.items() if role == "interviewer"
         )
-        # Independently choose feedback or control with equal probability.
-        assigned_condition = choice(("feedback", "control"))
+        # Choose uniformly from configured condition keys; only server-side room state stores the label.
+        condition_names = tuple(STUDY_CONFIGURATION["condition_allocation"]["conditions"])
+        assigned_condition = choice(condition_names)
         # Keep the condition in server-side room state, keyed by the interviewer ID.
         rooms[code]["conditions"] = {interviewer_room_participant_id: assigned_condition}
         # Buffer the authoritative role and condition assignment; it is batch-written at feedback with the rest of the study.

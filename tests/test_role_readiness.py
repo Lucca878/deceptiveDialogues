@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from datetime import datetime
 import unittest
 from unittest.mock import patch
@@ -596,6 +597,43 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(len(current_messages), 1)  # Show only the active dialogue in this browser view.
         self.assertTrue(current_messages[0]["is_claim"])
         self.assertIn("I have visited ", current_messages[0]["text"])
+
+    def test_role_instruction_template_is_selected_by_role_and_condition(self):
+        original_configuration = server.STUDY_CONFIGURATION
+        test_configuration = deepcopy(original_configuration)
+        conditions = test_configuration["condition_allocation"]["conditions"]
+        for condition_name, condition in conditions.items():
+            for role, instruction in condition["role_instructions"].items():
+                instruction["text"] = f"<p>{condition_name}-{role}-only</p>"
+        server.STUDY_CONFIGURATION = test_configuration
+        try:
+            self.pair()
+            room = server.rooms["ROOM01"]
+            interviewer_id = next(
+                participant_id
+                for participant_id, role in room["participants"].items()
+                if role == "interviewer"
+            )
+            clients = {"first": self.first, "second": self.second}
+
+            def capture_fragment(_template_name, **context):
+                # Only the selected trusted fragment is passed to rendering; the condition label stays server-side.
+                self.assertNotIn("condition", context)
+                self.assertNotIn("conditions", context)
+                return context["role_instruction_html"]
+
+            for condition_name, condition in conditions.items():
+                room["conditions"] = {interviewer_id: condition_name}
+                for participant_id, role in room["participants"].items():
+                    with self.subTest(condition=condition_name, role=role):
+                        expected_text = condition["role_instructions"][role]["text"]
+                        with patch("server.render_template", side_effect=capture_fragment):
+                            response = clients[participant_id].get("/role-instructions")
+                        self.assertEqual(response.status_code, 200)
+                        self.assertEqual(response.get_data(as_text=True), expected_text)
+                        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        finally:
+            server.STUDY_CONFIGURATION = original_configuration
 
     def test_full_lifecycle_private_instructions_and_both_ready(self):
         self.assertEqual(self.first.get("/dialogue").location, "/room")

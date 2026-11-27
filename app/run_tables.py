@@ -204,8 +204,8 @@ def persist_raw_events(engine: Engine, run_id: str, events: list[dict[str, Any]]
         return insert_raw_events(connection, run_id, events)
 
 
-def _load_configuration(path: Path) -> dict[str, Any]:
-    """Load a JSON object while rejecting likely credentials from run metadata."""
+def load_study_configuration(path: Path) -> dict[str, Any]:
+    """Load and validate study settings while snapshotting editable participant materials."""
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -238,13 +238,61 @@ def _load_configuration(path: Path) -> dict[str, Any]:
         if target is not None and (not isinstance(target, int) or isinstance(target, bool) or target < 0):
             raise click.ClickException(f"{field} must be a non-negative integer or null.")
 
+    # Validate that the configured assignment method and condition map are supported by this server.
+    condition_allocation = value.get("condition_allocation")
+    if not isinstance(condition_allocation, dict):
+        raise click.ClickException("condition_allocation must be a JSON object.")
+    if condition_allocation.get("method") != "equal_random_choice":
+        raise click.ClickException("condition_allocation.method must be equal_random_choice.")
+    conditions = condition_allocation.get("conditions")
+    if not isinstance(conditions, dict) or len(conditions) < 2:
+        raise click.ClickException("condition_allocation.conditions must define at least two conditions.")
+
+    workspace_root = path.resolve().parent.parent
+    template_root = (workspace_root / "app" / "templates").resolve()
+    role_names = {"interviewer", "interviewee"}
+    for condition_name, condition in conditions.items():
+        if not isinstance(condition_name, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", condition_name):
+            raise click.ClickException("Condition names must be lowercase identifiers.")
+        if not isinstance(condition, dict):
+            raise click.ClickException(f"condition_allocation.conditions.{condition_name} must be an object.")
+        role_instructions = condition.get("role_instructions")
+        if not isinstance(role_instructions, dict) or set(role_instructions) != role_names:
+            raise click.ClickException(
+                f"Each condition must define role_instructions for interviewer and interviewee."
+            )
+
+        # Snapshot each role's source and template name so runtime rendering and metadata use the same material.
+        instruction_snapshots = {}
+        for role_name, material_path in role_instructions.items():
+            if not isinstance(material_path, str) or not material_path.strip():
+                raise click.ClickException(
+                    f"condition_allocation.conditions.{condition_name}.role_instructions.{role_name} must be a file path."
+                )
+            source_path = Path(material_path)
+            if not source_path.is_absolute():
+                source_path = workspace_root / source_path
+            source_path = source_path.resolve()
+            if not source_path.is_relative_to(template_root):
+                raise click.ClickException("Role instruction files must be inside app/templates/.")
+            try:
+                text_snapshot = source_path.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError) as error:
+                raise click.ClickException(f"Could not read {condition_name} {role_name} instructions: {error}") from error
+            if not text_snapshot:
+                raise click.ClickException(f"The {condition_name} {role_name} instruction file is empty.")
+            instruction_snapshots[role_name] = {
+                "source": str(source_path.relative_to(workspace_root)),
+                "text": text_snapshot,
+            }
+        condition["role_instructions"] = instruction_snapshots
+
     participant_materials = value.get("participant_materials")
     if participant_materials is not None:
         if not isinstance(participant_materials, dict):
             raise click.ClickException("participant_materials must be a JSON object.")
-        workspace_root = path.resolve().parent.parent
         snapshots = {}
-        for material_name in ("consent", "general_instructions", "role_instructions", "debriefing"):
+        for material_name in ("consent", "general_instructions", "debriefing"):
             material_path = participant_materials.get(material_name)
             if not isinstance(material_path, str) or not material_path.strip():
                 raise click.ClickException(f"participant_materials.{material_name} must be a file path.")
@@ -281,7 +329,7 @@ def register_run_table_commands(app: Flask) -> None:
         replace_existing: bool,
     ) -> None:
         """Initialize run tables, optionally deleting both tables before recreation."""
-        configuration = _load_configuration(config_path)
+        configuration = load_study_configuration(config_path)
         # Refuse to initialize a participant run that declares mandatory verification while the app has it disabled.
         if configuration.get("human_verification_required") is True and current_app.config.get("TURNSTILE_ENABLED") is not True:
             raise click.ClickException("This study run requires human verification, but TURNSTILE_ENABLED is not true.")
