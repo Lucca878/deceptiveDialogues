@@ -70,7 +70,16 @@ class RawEventExportTests(unittest.TestCase):
                 occurred_at="2026-01-01T10:00:01.000+00:00",
                 started_at="2026-01-01T10:00:00.000+00:00",
                 ended_at="2026-01-01T10:00:01.000+00:00", duration_seconds=1.0,
-                event_data={"verified": True, "prolific_id": f"prolific-{index}", "verification_page_visits": []},
+                # Match the nested interval shape recorded by successful verification.
+                event_data={
+                    "verified": True,
+                    "prolific_id": f"prolific-{index}",
+                    "verification_page_visits": ([{
+                        "started_at": "2026-01-01T10:00:00.000+00:00",
+                        "ended_at": "2026-01-01T10:00:01.000+00:00",
+                        "duration_seconds": 1.0,
+                    }] if index == 0 else []),
+                },
                 event_room_id=None, event_room_code=None,
             )
             add(f"start-{index}", "study_started", participant_id=participant_id, occurred_at=participant_start, event_room_id=None, event_room_code=None)
@@ -149,6 +158,7 @@ class RawEventExportTests(unittest.TestCase):
         self.assertEqual(interviewer_row["room_id"], "opaque-room-id")
         self.assertEqual(interviewer_row["condition"], "feedback")
         self.assertEqual(interviewee_row["condition"], "feedback")
+        self.assertEqual(interviewer_row["verification_duration_seconds"], "1.0")
         self.assertEqual(interviewer_row["screening_liverpool_visited"], "yes")
         self.assertEqual(interviewer_row["screening_liverpool_familiarity"], "4")
         self.assertEqual(interviewer_row["dialogue_duration_seconds"], "400.0")
@@ -171,6 +181,18 @@ class RawEventExportTests(unittest.TestCase):
         room_json = json.loads(next(output_directory.glob("room_opaque-room-id_test_*.json")).read_text())
         self.assertEqual(len(complete_json["participants"]), 2)
         self.assertEqual(len(complete_json["rooms"]), 1)
+        interviewer_json = next(
+            item for item in complete_json["participants"]
+            if item["participant_id"] == "participant-interviewer"
+        )
+        self.assertEqual(interviewer_json["page_visits"][0], {
+            "page_name": "verification",
+            "entered_at": "2026-01-01T10:00:00.000+00:00",
+            "exited_at": "2026-01-01T10:00:01.000+00:00",
+            "duration_seconds": 1.0,
+            "room_id": None,
+            "sequence": 1,
+        })
         self.assertEqual(room_json["room"]["dialogues"][0]["turns"][0]["question_type_interviewer_message"], "open-ended")
 
     def test_raw_export_rejects_uninitialized_run_and_public_static_path(self):

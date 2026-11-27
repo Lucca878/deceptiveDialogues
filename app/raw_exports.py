@@ -107,7 +107,14 @@ def _page_visits(events: list[dict[str, Any]], participant_id: str) -> list[dict
             })
         elif event["event_type"] == "human_verification_completed":
             for visit in event["event_data"].get("verification_page_visits", []):
-                visits.append({**visit, "room_id": event.get("room_id")})
+                # Verification intervals use started_at/ended_at in raw data; normalize them for exports.
+                visits.append({
+                    "page_name": "verification",
+                    "entered_at": _timestamp(visit.get("started_at")),
+                    "exited_at": _timestamp(visit.get("ended_at")),
+                    "duration_seconds": visit.get("duration_seconds"),
+                    "room_id": event.get("room_id"),
+                })
 
     visits.sort(key=lambda visit: visit.get("entered_at") or "")
     for sequence, visit in enumerate(visits, start=1):
