@@ -196,6 +196,48 @@ class RawEventExportTests(unittest.TestCase):
         })
         self.assertEqual(room_json["room"]["dialogues"][0]["turns"][0]["question_type_interviewer_message"], "open-ended")
 
+    def test_cumulative_verification_snapshots_are_not_double_counted(self):
+        # A second successful verification stores the full visit history, not only new intervals.
+        verification_visits = [
+            {
+                "started_at": f"2026-01-01T10:00:0{second}.000+00:00",
+                "ended_at": f"2026-01-01T10:00:0{second + 1}.000+00:00",
+                "duration_seconds": 1.0,
+            }
+            for second in range(3)
+        ]
+        with self.engine.begin() as connection:
+            insert_raw_events(connection, "test", [{
+                "event_id": "verification-retry",
+                "participant_id": "participant-interviewer",
+                "event_type": "human_verification_completed",
+                "occurred_at": "2026-01-01T10:00:03.000+00:00",
+                "event_data": {
+                    "verified": True,
+                    "verification_page_visits": verification_visits,
+                },
+            }])
+
+        output_directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, output_directory)
+        with server.app.app_context():
+            export_raw_study(output_directory, "test", self.engine)
+
+        complete_json = json.loads(next(output_directory.glob("complete_test_*.json")).read_text())
+        participant = next(
+            item for item in complete_json["participants"]
+            if item["participant_id"] == "participant-interviewer"
+        )
+        verification_visits_exported = [
+            visit for visit in participant["page_visits"] if visit["page_name"] == "verification"
+        ]
+        self.assertEqual(len(verification_visits_exported), 3)
+        self.assertEqual(
+            [visit["entered_at"] for visit in verification_visits_exported],
+            [visit["started_at"] for visit in verification_visits],
+        )
+        self.assertEqual(participant["verification_duration_seconds"], 3.0)
+
     def test_raw_export_rejects_uninitialized_run_and_public_static_path(self):
         with server.app.app_context():
             with tempfile.TemporaryDirectory() as output_directory:

@@ -158,7 +158,7 @@ def _read_events(engine: Engine, run_id: str) -> list[dict[str, Any]]:
 
 
 def _page_visits(events: list[dict[str, Any]], participant_id: str) -> list[dict[str, Any]]:
-    """Collect page intervals, including verification visits nested in its first event."""
+    """Collect page intervals, using the latest cumulative verification snapshot."""
     visits = []
     for event in events:
         if event.get("participant_id") != participant_id:
@@ -171,16 +171,23 @@ def _page_visits(events: list[dict[str, Any]], participant_id: str) -> list[dict
                 "duration_seconds": event.get("duration_seconds"),
                 "room_id": event.get("room_id"),
             })
-        elif event["event_type"] == "human_verification_completed":
-            for visit in event["event_data"].get("verification_page_visits", []):
-                # Verification intervals use started_at/ended_at in raw data; normalize them for exports.
-                visits.append({
-                    "page_name": "verification",
-                    "entered_at": _timestamp(visit.get("started_at")),
-                    "exited_at": _timestamp(visit.get("ended_at")),
-                    "duration_seconds": visit.get("duration_seconds"),
-                    "room_id": event.get("room_id"),
-                })
+
+    # Each successful verification event snapshots all visits so far; earlier snapshots overlap.
+    latest_verification = next((
+        event for event in reversed(events)
+        if event.get("participant_id") == participant_id
+        and event["event_type"] == "human_verification_completed"
+    ), None)
+    if latest_verification is not None:
+        for visit in latest_verification["event_data"].get("verification_page_visits", []):
+            # Verification intervals use started_at/ended_at in raw data; normalize them for exports.
+            visits.append({
+                "page_name": "verification",
+                "entered_at": _timestamp(visit.get("started_at")),
+                "exited_at": _timestamp(visit.get("ended_at")),
+                "duration_seconds": visit.get("duration_seconds"),
+                "room_id": latest_verification.get("room_id"),
+            })
 
     visits.sort(key=lambda visit: visit.get("entered_at") or "")
     for sequence, visit in enumerate(visits, start=1):
