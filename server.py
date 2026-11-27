@@ -1421,6 +1421,12 @@ def send_room_message(code): # Handles sending a message to a specific room by a
         # Before accepting an interviewer message, reject it if this claim already has 10 questions
         if role == "interviewer" and room["current_claim"]["interviewer_question_count"] >= 10:
             return jsonify(error="This claim has already received 10 questions from the interviewer."), 403
+        # Do not let an interviewer start another question until the previous one is categorized.
+        if (
+            role == "interviewer"
+            and room["current_claim"].get("pending_question_type_message_id") is not None
+        ):
+            return jsonify(error="Categorize the previous question before sending another one."), 403
         # Reject this request unless role matches the room's next allowed speaker.
         if role != room["next_speaker"]:
             return jsonify(error="It is not your turn to speak."), 403
@@ -1447,7 +1453,7 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             "turn_number": turn_number,
         }
         if role == "interviewer":
-            # Keep the interviewee from answering until this message has a server-validated category.
+            # Track category separately while immediately giving the interviewee the next turn.
             room["current_claim"]["pending_question_type_message_id"] = message["id"]
         room["messages"].append(message)
         # Buffer message content with the stable identity and server-derived dialogue/turn coordinates.
@@ -1499,11 +1505,8 @@ def send_room_message(code): # Handles sending a message to a specific room by a
             room["current_claim"]["judgement_started_at"] = message["timestamp"]
         if room["current_claim"].get("question_turns_ended"):
             room["next_speaker"] = None
-        elif room["current_claim"].get("pending_question_type_message_id") is not None:
-            # Pause turn-taking while the interviewer classifies the question they just sent.
-            room["next_speaker"] = None
         else:
-            # Otherwise, switch the next allowed speaker to the other role.
+            # The next participant may act while interviewer category recording proceeds independently.
             room["next_speaker"] = "interviewer" if role == "interviewee" else "interviewee"
 
     return jsonify(message=_message_for_client(message)), 201 # Return the newly created message without its private timestamp
@@ -1562,9 +1565,8 @@ def set_question_type(code):
             "occurred_at": assigned_at,
             "event_data": {"target_event_id": target_event_id, "question_type": question_type},
         })
-        # Clear the turn gate and grant the interviewee the next turn atomically.
+        # Clear only the category gate; preserve whichever participant currently owns the conversation turn.
         del room["current_claim"]["pending_question_type_message_id"]
-        room["next_speaker"] = "interviewee"
 
     return jsonify(ok=True), 200
 
@@ -1590,6 +1592,8 @@ def submit_judgement(code):
             return jsonify(error="Only the interviewer can submit a judgement."), 403
         if room["current_claim"].get("question_turns_ended") is not True:
             return jsonify(error="All ten questions must be asked before submitting a judgement."), 403
+        if room["current_claim"].get("pending_question_type_message_id") is not None:
+            return jsonify(error="Categorize the final question before submitting a judgement."), 403
 
         judgement = data.get("judgement")
         confidence = data.get("confidence")
@@ -1738,6 +1742,12 @@ def set_typing(code):
         # Reject typing pings unless this participant's role is room["next_speaker"].
         if room["next_speaker"] != room["participants"][room_participant_id]:
             return jsonify(error="It's not your turn to type."), 403
+        # Category selection remains a required interviewer action even if the interviewee has answered quickly.
+        if (
+            room["participants"][room_participant_id] == "interviewer"
+            and room["current_claim"].get("pending_question_type_message_id") is not None
+        ):
+            return jsonify(error="Categorize the previous question before typing another one."), 403
 
         room["typing"][room_participant_id] = monotonic() # Update this room participant's typing time.
     return jsonify(status="ok") # Return a success status after setting the typing indicator
@@ -1800,6 +1810,11 @@ def get_room_messages(code):
         dialogue_number = current_claim["dialogue_id"] if current_claim else None
         # This response is bound to the requester; it exposes no city answer or claim truth.
         can_send = room["next_speaker"] == room["participants"][room_participant_id]
+        if (
+            room["participants"][room_participant_id] == "interviewer"
+            and question_type_pending
+        ):
+            can_send = False
         # Only the interviewer needs to know why the turn is paused; the category itself stays private.
         interviewer_question_type_pending = (
             question_type_pending and room["participants"][room_participant_id] == "interviewer"

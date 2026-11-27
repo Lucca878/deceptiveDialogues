@@ -440,7 +440,7 @@ class RoleReadinessTests(unittest.TestCase):
             self.assertEqual(second_visit["ended_at"], datetime.fromisoformat(second_redirect_time).replace(tzinfo=None))
             self.assertEqual(second_visit["duration_seconds"], 120.0)
 
-    def test_interviewer_category_is_selected_after_send_and_gates_the_reply(self):
+    def test_interviewer_category_can_overlap_with_interviewee_reply(self):
         room, interviewer, interviewer_id, interviewee, interviewee_id = self.prepare_message_turn()
         endpoint = "/api/rooms/ROOM01/messages"
 
@@ -450,7 +450,7 @@ class RoleReadinessTests(unittest.TestCase):
         })
         self.assertEqual(sent_question.status_code, 201)
         self.assertEqual(room["current_claim"]["interviewer_question_count"], 1)
-        self.assertIsNone(room["next_speaker"])
+        self.assertEqual(room["next_speaker"], "interviewee")
         pending_message = room["messages"][-1]
         self.assertIsNone(pending_message.get("question_type"))
         self.assertEqual(
@@ -464,26 +464,35 @@ class RoleReadinessTests(unittest.TestCase):
 
         # The interviewee can see the sent question but cannot reply before classification.
         interviewee_poll = interviewee.get(endpoint, query_string={"room_participant_id": interviewee_id}).get_json()
-        self.assertIs(interviewee_poll["can_send"], False)
+        self.assertIs(interviewee_poll["can_send"], True)
         self.assertNotIn("question_type_pending", interviewee_poll)
         interviewer_repeat = interviewer.post(endpoint, json={
             "room_participant_id": interviewer_id,
             "text": "A second question cannot be sent yet.",
         })
         self.assertEqual(interviewer_repeat.status_code, 403)
-        premature_reply = interviewee.post(endpoint, json={
+        overlapping_reply = interviewee.post(endpoint, json={
             "room_participant_id": interviewee_id,
             "text": "I enjoyed the museums.",
         })
-        self.assertEqual(premature_reply.status_code, 403)
-        self.assertIn("not your turn", premature_reply.get_json()["error"].lower())
+        self.assertEqual(overlapping_reply.status_code, 201)
+        self.assertEqual(room["next_speaker"], "interviewer")
+        interviewer_after_reply = interviewer.get(endpoint, query_string={"room_participant_id": interviewer_id}).get_json()
+        self.assertIs(interviewer_after_reply["can_send"], False)
+        self.assertIs(interviewer_after_reply["question_type_pending"], True)
+        blocked_next_question = interviewer.post(endpoint, json={
+            "room_participant_id": interviewer_id,
+            "text": "The next question must wait for classification.",
+        })
+        self.assertEqual(blocked_next_question.status_code, 403)
+        self.assertIn("categorize", blocked_next_question.get_json()["error"].lower())
 
         invalid_category = interviewer.post("/api/rooms/ROOM01/question-type", json={
             "room_participant_id": interviewer_id,
             "question_type": "unsupported",
         })
         self.assertEqual(invalid_category.status_code, 400)
-        self.assertIsNone(room["next_speaker"])
+        self.assertEqual(room["next_speaker"], "interviewer")
 
         accepted = interviewer.post("/api/rooms/ROOM01/question-type", json={
             "room_participant_id": interviewer_id,
@@ -493,14 +502,8 @@ class RoleReadinessTests(unittest.TestCase):
         self.assertEqual(pending_message["question_type"], "open-ended")
         self.assertEqual(pending_message["role"], "interviewer")
         self.assertNotIn("pending_question_type_message_id", room["current_claim"])
-        self.assertEqual(room["next_speaker"], "interviewee")
-        self.assertIs(interviewee.get(endpoint, query_string={"room_participant_id": interviewee_id}).get_json()["can_send"], True)
-        answer = interviewee.post(endpoint, json={
-            "room_participant_id": interviewee_id,
-            "text": "I enjoyed the museums.",
-        })
-        self.assertEqual(answer.status_code, 201)
         self.assertEqual(room["next_speaker"], "interviewer")
+        self.assertIs(interviewer.get(endpoint, query_string={"room_participant_id": interviewer_id}).get_json()["can_send"], True)
 
         # Neither the interviewer nor interviewee receives the server-only category through polling.
         for client, participant_id in ((interviewer, interviewer_id), (interviewee, interviewee_id)):
@@ -529,36 +532,31 @@ class RoleReadinessTests(unittest.TestCase):
             "text": "What did you enjoy about the city?",
         })
         self.assertEqual(interviewer_question.status_code, 201)
-        self.assertIsNone(room["next_speaker"])
-
-        premature_answer = interviewee.post(endpoint, json={
-            "room_participant_id": interviewee_id,
-            "text": "I enjoyed the museums.",
-        })
-        self.assertEqual(premature_answer.status_code, 403)
-        self.assertIsNone(room["next_speaker"])
-        self.assertEqual(len(room["messages"]), 2)
-
-        category = interviewer.post("/api/rooms/ROOM01/question-type", json={
-            "room_participant_id": interviewer_id,
-            "question_type": "follow-up",
-        })
-        self.assertEqual(category.status_code, 200)
         self.assertEqual(room["next_speaker"], "interviewee")
 
-        rejected_answer = interviewee.post(endpoint, json={
+        rejected_answer_category = interviewee.post(endpoint, json={
             "room_participant_id": interviewee_id,
             "text": "I enjoyed the museums.",
             "question_type": "probing",
         })
-        self.assertEqual(rejected_answer.status_code, 400)
+        self.assertEqual(rejected_answer_category.status_code, 400)
         self.assertEqual(room["next_speaker"], "interviewee")
+        self.assertEqual(len(room["messages"]), 2)
 
         accepted_answer = interviewee.post(endpoint, json={
             "room_participant_id": interviewee_id,
             "text": "I enjoyed the museums.",
         })
         self.assertEqual(accepted_answer.status_code, 201)
+        self.assertEqual(room["next_speaker"], "interviewer")
+
+        category = interviewer.post("/api/rooms/ROOM01/question-type", json={
+            "room_participant_id": interviewer_id,
+            "question_type": "follow-up",
+        })
+        self.assertEqual(category.status_code, 200)
+        self.assertEqual(room["next_speaker"], "interviewer")
+        self.assertIs(interviewer.get(endpoint, query_string={"room_participant_id": interviewer_id}).get_json()["can_send"], True)
         self.assertNotIn("question_type", room["messages"][-1])
         self.assertNotIn("question_type", accepted_answer.get_json()["message"])
         for client, participant_id in ((interviewer, interviewer_id), (interviewee, interviewee_id)):
@@ -804,12 +802,12 @@ class RoleReadinessTests(unittest.TestCase):
         )
         self.assertEqual(interviewer_message.status_code, 201)
         self.assertEqual(interviewer_message.get_json()["message"]["role"], "interviewer")
-        self.assertIsNone(room["next_speaker"])
+        self.assertEqual(room["next_speaker"], "interviewee")
         self.assertEqual(len(room["messages"]), 2)
         interviewer_poll = interviewer.get(f"/api/rooms/ROOM01/messages?room_participant_id={interviewer_id}").get_json()
         interviewee_poll = interviewee.get(f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}").get_json()
         self.assertIs(interviewer_poll["can_send"], False)
-        self.assertIs(interviewee_poll["can_send"], False)
+        self.assertIs(interviewee_poll["can_send"], True)
         self.assertEqual(interviewer_poll["question_number"], 1)
         self.assertEqual(interviewee_poll["question_number"], 1)
         self.assertTrue(interviewer_poll["question_type_pending"])
@@ -858,24 +856,46 @@ class RoleReadinessTests(unittest.TestCase):
             during_category_turn = interviewee.get(
                 f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}"
             ).get_json()
-            self.assertIs(during_category_turn["can_send"], False)
+            self.assertIs(during_category_turn["can_send"], True)
 
-            category = interviewer.post("/api/rooms/ROOM01/question-type", json={
-                "room_participant_id": interviewer_id,
-                "question_type": "open-ended",
-            })
-            self.assertEqual(category.status_code, 200)
-            during_answer_turn = interviewee.get(
-                f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}"
-            ).get_json()
-            self.assertEqual(during_answer_turn["question_number"], question_number)
-            self.assertIs(during_answer_turn["can_send"], True)
+            # Earlier answers can follow classification or overlap with it; the final answer exercises the race.
+            if question_number < 10:
+                category = interviewer.post("/api/rooms/ROOM01/question-type", json={
+                    "room_participant_id": interviewer_id,
+                    "question_type": "open-ended",
+                })
+                self.assertEqual(category.status_code, 200)
+                during_answer_turn = interviewee.get(
+                    f"/api/rooms/ROOM01/messages?room_participant_id={interviewee_id}"
+                ).get_json()
+                self.assertEqual(during_answer_turn["question_number"], question_number)
+                self.assertIs(during_answer_turn["can_send"], True)
 
             answer = interviewee.post(
                 "/api/rooms/ROOM01/messages",
                 json={"room_participant_id": interviewee_id, "text": f"Answer {question_number}."},
             )
             self.assertEqual(answer.status_code, 201)
+            if question_number == 10:
+                # Final judgement remains blocked until its question receives a category.
+                self.assertTrue(room["current_claim"]["question_turns_ended"])
+                final_pending_poll = interviewer.get(
+                    f"/api/rooms/ROOM01/messages?room_participant_id={interviewer_id}"
+                ).get_json()
+                self.assertTrue(final_pending_poll["question_type_pending"])
+                self.assertFalse(final_pending_poll["can_send"])
+                premature_judgement = interviewer.post("/api/rooms/ROOM01/judgement", json={
+                    "room_participant_id": interviewer_id,
+                    "judgement": "true",
+                    "confidence": 50,
+                })
+                self.assertEqual(premature_judgement.status_code, 403)
+                self.assertIn("categorize", premature_judgement.get_json()["error"].lower())
+                final_category = interviewer.post("/api/rooms/ROOM01/question-type", json={
+                    "room_participant_id": interviewer_id,
+                    "question_type": "open-ended",
+                })
+                self.assertEqual(final_category.status_code, 200)
             if question_number < 10:
                 next_question_turn = interviewer.get(
                     f"/api/rooms/ROOM01/messages?room_participant_id={interviewer_id}"

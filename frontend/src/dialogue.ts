@@ -297,6 +297,7 @@ if (
       };
       if (!response.ok) throw new Error(data.error ?? "Could not load messages."); // Throw an error if the response is not OK
       const countdownActive = typeof data.seconds_remaining === "number";
+      const questionTypePending = role === "interviewer" && data.question_type_pending === true;
       const intervieweeWaiting = role === "interviewee" && data.question_turns_ended === true;
       const showTransitionPanel = countdownActive || intervieweeWaiting;
       transitionPanel.hidden = !showTransitionPanel;
@@ -326,7 +327,6 @@ if (
         return;
       }
       canSend = data.can_send === true;  // Update the canSend flag based on the server's response
-      const questionTypePending = role === "interviewer" && data.question_type_pending === true;
       if (questionTypePending && !selectingQuestionType) {
         // Restore the category step if the interviewer reloads while a question is awaiting classification.
         setQuestionTypeStep(true);
@@ -350,9 +350,10 @@ if (
         questionProgressTrack.setAttribute("aria-valuenow", String(questionNumber));
         questionProgressFill.style.width = `${questionNumber * 10}%`;
         if (data.question_turns_ended) {
-          form.hidden = true; // Replace the chat composer with the interviewer judgement or interviewee waiting panel.
+          // Keep the category selector visible if the final answer arrives before its question is categorized.
+          form.hidden = role !== "interviewer" || !questionTypePending;
           if (judgementForm) {
-            judgementForm.hidden = countdownActive;
+            judgementForm.hidden = countdownActive || questionTypePending;
           }
           questionCounter.textContent = "Questions complete";
           questionProgressNote.textContent = "Please wait for the next step.";
