@@ -234,6 +234,18 @@ The run-specific tables, initializer, and raw-derived participant/room exports a
 - Initialize a run with `flask --app server init-study-run --run-id test --config config/study_test.json --protocol-version dialogue_v1`. The command validates the run ID, creates `raw_test` and `metadata_test`, and stores the immutable configuration snapshot, including the actual city list. Repeating it with matching configuration is safe; it refuses changed metadata or partial schemas. The explicit `--replace-existing` option deletes and recreates both tables, including all raw events; the development deployment uses this reset and must not be used once research data needs to be retained.
 - Exports are written directly under `/var/lib/study2/exports/`, with a run ID and timestamp in each filename. The live SQLite database is `/var/lib/study2/study2.sqlite`; table names are inside that database file.
 
+### Future configurability roadmap
+
+The long-term goal is a reusable study skeleton whose validated configuration is the
+source of truth for both runtime behavior and the run's metadata snapshot. Current
+configuration fields should be audited so each is either actually used by the server
+or clearly identified as metadata-only.
+
+- **Condition effects:** Replace condition-name checks with explicit, validated settings—for example, whether interviewer judgement feedback is shown—while keeping participant-facing text configurable per condition and role.
+- **Protocol values:** Centralize dialogue/question counts, allowed question types, screening rules, and room capacity only where the study design intends them to vary.
+- **Validation and privacy:** Reject unsupported methods or settings at startup, and test that configured behavior is enforced server-side without exposing private condition or participant data.
+- **Reproducibility:** Snapshot effective settings and participant-material text for each run so later configuration edits cannot make existing records ambiguous.
+
 #### Export CSV and JSON files from the VPS
 
 Run these commands in a terminal on your Mac from any directory. They connect to the VPS, write timestamped TEST-run exports directly into the shared private exports directory, then download its contents to `~/study2-exports/`.
